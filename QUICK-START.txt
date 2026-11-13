@@ -1,0 +1,18 @@
+模型出图工作台｜网页版便携版
+
+1. 将 ZIP 完整解压到一个文件夹。
+2. Windows 双击 Start-Workbench.cmd。Mac 双击 Start-Workbench.command。
+3. 工作台会在默认浏览器打开。推荐使用 Chrome 或 Edge。
+   如浏览器没有打开，请复制启动窗口显示的 http://127.0.0.1 地址。
+4. 使用期间保留启动窗口。用完后按 Ctrl+C 或关闭窗口即可停止服务。
+
+便携包含 Node.js 运行环境及预编译网页，解压后可离线启动。
+Windows 包适用于 x64；Mac 请按「关于本机」选择 Apple 芯片或 Intel 包。
+若 macOS 拦截下载脚本，请在确认来源后按系统提示允许打开。
+
+可直接导入 OBJ 和带显示网格的 3DM。Windows 如需自动转换缺网格的 3DM，
+请先在同一台电脑安装并激活 Rhino 8。Mac 可先在 Rhino 另存带网格的副本。
+使用渲染助手时，在工作台设置中填写兼容的 API 地址、模型名和 Key。
+
+项目与更新
+https://github.com/aercafa/production_render_tool/releases

@@ -2,11 +2,19 @@
 
 把 OBJ 或 Rhino 3DM 做成带尺寸的产品展示图。画布左侧是轴测图，右侧是同尺度的俯视、正视和右视图。适合展项、设备外壳和产品方案的材质对照、外形沟通与汇报出图。尺寸标注基于导入的网格范围或手填名义值。
 
-功能实现、关键参数、故障复盘和后续迭代计划见 [项目复盘与开发经验](docs/project-retrospective.md)。
-
 ## 快速运行
 
-安装 Git、Node.js 24 LTS 和支持 WebGL2 的 Chrome 或 Edge。首次安装依赖需要网络。渲染和普通 PNG 导出在本机完成。
+### 下载 ZIP 后双击启动
+
+| 电脑 | 下载便携包 | 解压后双击 |
+| --- | --- | --- |
+| Windows x64 | [Windows ZIP](https://github.com/aercafa/production_render_tool/releases/latest/download/RenderWorkbench-Web-windows-x64.zip) | `Start-Workbench.cmd` |
+| Mac · Apple 芯片 | [Apple 芯片 ZIP](https://github.com/aercafa/production_render_tool/releases/latest/download/RenderWorkbench-Web-macos-arm64.zip) | `Start-Workbench.command` |
+| Mac · Intel | [Intel ZIP](https://github.com/aercafa/production_render_tool/releases/latest/download/RenderWorkbench-Web-macos-x64.zip) | `Start-Workbench.command` |
+
+完整解压后再启动。便携包包含 Node.js 和预编译网页，启动无需安装依赖。工作台会在默认浏览器打开，推荐 Chrome 或 Edge。使用期间保留启动窗口，关闭窗口或按 Ctrl+C 停止服务。若默认端口被占用，启动台会自动尝试下一端口。下载的 macOS 脚本可能需要在系统设置中允许打开。
+
+通过 GitHub 的 **Code → Download ZIP** 下载的是源码。源码目录也提供双击入口，需先安装 Node.js 24 LTS，第一次启动需联网安装依赖和构建。以下是命令行方式。
 
 ### Windows · PowerShell
 
@@ -75,3 +83,5 @@ docker compose up --build
 `npm run dev` 启动开发服务器。网页依赖 TypeScript、Vite、Three.js、rhino3dm WASM 和本机 Node 服务。设置、Rhino 网格转换和模型 API 经本机服务工作，静态站点托管只提供前端文件，无法提供这些接口。
 
 `npm run build` 检查类型并构建。安装 Chrome 后可运行 `npm test`。测试使用合成模型和模拟 Chat Completions 服务。指定 `RENDER_32_ORIGINAL`、`RENDER_32_MESH`、`RENDER_MISSING_3DM`、`RENDER_COMPLETE_3DM` 或 `RENDER_CHARIOT_3DM` 可加入相应真实文件测试。
+
+维护便携包时，先执行 `npm run build`，再用 Python 3.11 或以上运行 `python scripts/package-web.py all`。脚本校验固定版本的 Node.js 下载，生成的 ZIP 位于 `release/web/`。

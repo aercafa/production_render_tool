@@ -9,3 +9,4 @@ local-fixtures/
 .env.*
 settings.json
 *.3dm
+/docs/project-retrospective.md
