@@ -56,6 +56,7 @@ type ModelMaterial = {
   textured: boolean;
   varies: boolean;
   longAxes: Set<GrainDirection>;
+  part?: { mesh: THREE.Mesh; index: number; material: string; size: number[]; center: number[]; role: string };
 };
 
 export const propertyLabels = {
@@ -69,6 +70,7 @@ export const styleLabels = { studio: '棚拍材质', premium: '高保真棚拍',
 
 function inventory(model: RenderModel) {
   const groups = new Map<string, ModelMaterial>();
+  const parts: ModelMaterial[] = [];
   const labels = new Map<string, number>();
   const descriptions = new Map<THREE.Material, Map<ReturnType<typeof premiumSurface>,
     { values: MaterialValues; emits: boolean }>>();
@@ -124,33 +126,76 @@ function inventory(model: RenderModel) {
           objects: new Set(object.name ? [object.name] : []), slots: [{ mesh: object, index }],
           values, emits, textured: !!material.map, varies: false, longAxes: new Set([longAxis]) });
       }
+      const bounds = object.userData.workbenchBounds as THREE.Box3;
+      const dims = bounds.getSize(new THREE.Vector3());
+      const center = bounds.getCenter(new THREE.Vector3()).multiplyScalar(model.group.scale.x).add(model.group.position);
+      const extent = dims.clone().divide(model.size.clone().max(new THREE.Vector3(.001,.001,.001)));
+      const labelText = object.name + ' ' + label;
+      let role = '';
+      if (/玻璃|黑玻|屏幕|显示屏|glass|screen/i.test(labelText)) role = '玻璃或屏幕';
+      else if (/架体|框架|边框|frame/i.test(labelText)) role = '框架';
+      else if (/检修门|access door/i.test(labelText)) role = '检修门';
+      else if (/柜身|外壳|cabinet|enclosure/i.test(labelText)) role = '主体外壳';
+      else if (/底座|\bbase\b/i.test(labelText)) role = '底座';
+      else if (extent.z > .65 && extent.x > .65) role = '大尺寸竖向主体，可能为框架或外壳';
+      const id = 'p' + (parts.length + 1);
+      parts.push({ id, name: (object.name || '部件 ' + (parts.length + 1)) + (materials.length > 1 ? ' · ' + label : ''),
+        objects: new Set(), slots: [{ mesh: object, index }], values, emits,
+        textured: !!material.map, varies: false, longAxes: new Set([longAxis]),
+        part: { mesh: object, index, material: groups.get(key)!.id, size: dims.toArray(),
+          center: center.toArray(), role } });
     });
   });
-  return groups;
+  return { groups, parts };
 }
 
 export class AssistantEdits {
   readonly materials: Map<string, ModelMaterial>;
+  readonly parts: Map<string, ModelMaterial>;
   private values: OverridesById = new Map();
   private history: { values: OverridesById; scene: SceneValues; after: SceneValues }[] = [];
 
-  constructor(model: RenderModel) {
-    this.materials = new Map(Array.from(inventory(model).values(), material => [material.id, material]));
+  constructor(private readonly model: RenderModel) {
+    const { groups, parts } = inventory(model);
+    this.materials = new Map(Array.from(groups.values(), material => [material.id, material]));
+    this.parts = new Map(parts.map(part => [part.id, part]));
   }
 
   get canUndo() { return this.history.length > 0; }
+  target(id: string) { return this.materials.get(id) ?? this.parts.get(id); }
+  partAt(mesh: THREE.Mesh, index: number) {
+    return [...this.parts.values()].find(part => part.part?.mesh === mesh && part.part.index === index);
+  }
+  private currentValues(id: string) {
+    const part = this.parts.get(id)?.part;
+    const group = part && this.values.get(part.material);
+    const local = this.values.get(id);
+    return local?.pattern ? local : { ...group, ...local };
+  }
 
   context(scope: string, scene: SceneValues) {
-    const selected = scope ? this.materials.get(scope) : undefined;
-    const truncated = !selected && this.materials.size > 100;
-    const materials = selected ? [selected] : truncated ? [] : [...this.materials.values()];
+    const selected = this.target(scope);
+    const truncated = !selected && this.materials.size > 55;
+    const materials = selected ? [this.materials.get(selected.part?.material ?? selected.id)!]
+      : truncated ? [] : [...this.materials.values()];
+    const candidates = selected?.part ? [selected] : [...this.parts.values()]
+      .filter(target => !selected || target.part?.material === selected.id);
+    const parts = candidates.slice(0, truncated ? 90 : 60).map(target => {
+      const part = target.part!;
+      const rounded = (values: number[]) => values.map(value => +value.toFixed(3));
+      return { id:target.id, name:target.name.slice(0,96), material:part.material, role:part.role || undefined,
+        size:rounded(part.size), center:rounded(part.center), color:this.currentValues(target.id).color ?? target.values.color,
+        textured:target.textured, surface:{ ...target.values, ...this.currentValues(target.id) } };
+    });
     return {
-      current: scene, selectedMaterial: selected?.id ?? null, totalMaterials: this.materials.size,
-      requiresMaterialSelection: truncated,
+      current: scene, selectedMaterial: selected && !selected.part ? selected.id : null,
+      selectedPart: selected?.part ? selected.id : null, totalMaterials: this.materials.size,
+      parts, totalParts:candidates.length, unit:this.model.unit,
+      requiresMaterialSelection: truncated || candidates.length > parts.length,
       materials: materials.map(part => ({
         id: part.id, name: part.name.slice(0, 96), count: part.slots.length,
         usedBy: Array.from(part.objects).slice(0, 4).map(name => name.slice(0, 56)),
-        values: { ...part.values, ...this.values.get(part.id) },
+        values: { ...part.values, ...this.currentValues(part.id) },
         hasEmission: ['screen', 'emissive'].includes(this.values.get(part.id)?.pattern ?? '') ||
           (!this.values.get(part.id)?.pattern && part.emits),
         textured: !this.values.get(part.id)?.pattern || this.values.get(part.id)?.pattern === 'screen' ? part.textured : false,
@@ -169,14 +214,14 @@ export class AssistantEdits {
         throw new Error('修改建议格式不正确。');
       }
       const { target, property, value } = c;
-      const part = this.materials.get(target);
+      const part = this.target(target);
       let valid = false;
       if (target === 'scene') {
         if (property === 'style') valid = typeof value === 'string' && Object.hasOwn(styleLabels, value);
         if (property === 'exposure') valid = typeof value === 'number' && Number.isInteger(value) && value >= -10 && value <= 10;
         if (property === 'ao' || property === 'shadow') valid = numberIn(value, 1);
         if (property === 'reflection') valid = numberIn(value, 2);
-      } else if (part && available.has(target) && (!scope || scope === target)) {
+      } else if (part && available.has(target) && (!scope || scope === target || part.part?.material === scope)) {
         if (property === 'color' || property === 'emissiveColor') valid = typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value);
         if (property === 'roughness' || property === 'metalness') valid = numberIn(value, 1);
         if (property === 'emissiveIntensity') valid = numberIn(value, 2);
@@ -195,38 +240,43 @@ export class AssistantEdits {
     for (const change of changes) {
       if (change.target === 'scene' || change.property === 'pattern') continue;
       const pattern = changes.find(item => item.target === change.target && item.property === 'pattern')?.value
-        ?? this.values.get(change.target)?.pattern ?? 'source';
+        ?? this.currentValues(change.target).pattern ?? 'source';
       if (pattern !== 'source') {
         const preset = materialPresets[pattern as MaterialPreset];
-        if (!preset.tune.includes(change.property)) throw new Error(preset.label + '不支持该参数，请换用合适的材质或参数。');
-      } else if (change.property.startsWith('grain') ||
-          ((change.property === 'emissiveColor' || change.property === 'emissiveIntensity') && !this.materials.get(change.target)?.emits) ||
-          change.property === 'transmission' || change.property === 'ior') {
+        if (change.property.startsWith('grain') && !preset.tune.includes(change.property)) {
+          throw new Error(preset.label + '不支持该纹理参数，请换用合适的材质或参数。');
+        }
+      } else if (change.property.startsWith('grain')) {
         throw new Error('请先选择支持此参数的材质预设。');
       }
     }
     return changes.filter(({ target, property, value }) => {
       if (target === 'scene') return scene[property as SceneProperty] !== value;
-      const part = this.materials.get(target)!;
-      const current = this.values.get(target)?.[property as MaterialProperty];
+      const part = this.target(target)!;
+      const current = this.currentValues(target)[property as MaterialProperty];
       const patternChange = changes.find(c => c.target === target && c.property === 'pattern');
       if (patternChange && property !== 'pattern') {
         const pattern = patternChange.value as MaterialValues['pattern'];
         const base = pattern === 'source' ? part.values : presetValues(pattern, part.textured);
-        if (pattern !== (this.values.get(target)?.pattern ?? part.values.pattern) ||
-            (pattern === 'source' && this.values.has(target))) {
+        if (pattern !== (this.currentValues(target).pattern ?? part.values.pattern) ||
+            (pattern === 'source' && (this.values.has(target) || this.currentValues(target).pattern))) {
           const presetValue = base[property as keyof typeof base];
           return presetValue === undefined || presetValue !== value;
         }
       }
-      if (property === 'pattern' && value === 'source') return this.values.has(target);
+      if (property === 'pattern' && value === 'source') {
+        const group = part.part && this.values.get(part.part.material);
+        const local = this.values.get(target);
+        if (group && local?.pattern !== 'source') return true;
+        return !!local && (local.pattern !== 'source' || Object.keys(local).length > 1);
+      }
       return (current === undefined && part.varies) || (current ?? part.values[property as MaterialProperty]) !== value;
     });
   }
 
   describe({ target, property, value }: Change, scene: SceneValues, batch: Change[]) {
-    const part = this.materials.get(target);
-    const previous = part ? (this.values.get(target)?.[property as MaterialProperty] ?? part.values[property as MaterialProperty])
+    const part = this.target(target);
+    const previous = part ? (this.currentValues(target)[property as MaterialProperty] ?? part.values[property as MaterialProperty])
       : scene[property as SceneProperty];
     const label = (v: string | number) => {
       if (property === 'style') return styleLabels[v as RenderStyle];
@@ -253,10 +303,14 @@ export class AssistantEdits {
     const values = new Map(this.values);
     for (const { target, property, value } of changes) {
       if (property !== 'pattern') continue;
-      if (value === 'source') values.delete(target);
+      if (value === 'source') {
+        const part = this.parts.get(target)?.part;
+        if (part && values.has(part.material)) values.set(target, { pattern:'source' });
+        else values.delete(target);
+      }
       else {
         const pattern = value as MaterialPreset;
-        values.set(target, presetValues(pattern, !!this.materials.get(target)?.textured));
+        values.set(target, presetValues(pattern, !!this.target(target)?.textured));
       }
     }
     for (const { target, property, value } of changes) {
@@ -282,13 +336,20 @@ export class AssistantEdits {
     return next;
   }
 
-  overrides(): MaterialOverrides {
+  beforeLastEdit() {
+    const entry = this.history.at(-1);
+    return entry ? { scene: entry.scene, overrides: this.overrides(entry.values) } : undefined;
+  }
+
+  overrides(source = this.values): MaterialOverrides {
     const result = new Map<THREE.Mesh, Map<number, Partial<MaterialValues>>>();
-    for (const [id, values] of this.values) {
-      for (const { mesh, index } of this.materials.get(id)!.slots) {
+    for (const target of [...this.materials.values(), ...this.parts.values()]) {
+      const values = source.get(target.id);
+      if (!values) continue;
+      for (const { mesh, index } of target.slots) {
         let slots = result.get(mesh);
         if (!slots) { slots = new Map(); result.set(mesh, slots); }
-        slots.set(index, values);
+        slots.set(index, values.pattern ? values : { ...slots.get(index), ...values });
       }
     }
     return result;

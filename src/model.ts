@@ -51,12 +51,54 @@ function inspectRhino(buffer: ArrayBuffer): Promise<CheckResult> {
   });
 }
 
+function biasCoveredCaps(parts: { mesh: THREE.Mesh; bounds: THREE.Box3 }[], tolerance: number) {
+  const down = new THREE.Vector3(0, 0, -1);
+  const ray = new THREE.Raycaster();
+  const center = new THREE.Vector3();
+  const size = new THREE.Vector3();
+  const hitsTop = (mesh: THREE.Mesh, x: number, y: number, z: number) => {
+    ray.set(new THREE.Vector3(x, y, z + tolerance * 4), down);
+    ray.far = tolerance * 6;
+    const hit = ray.intersectObject(mesh, false)[0];
+    return hit && Math.abs(hit.point.z - z) <= tolerance;
+  };
+  parts.sort((a, b) => a.bounds.max.z - b.bounds.max.z);
+  let first = 0;
+  for (const { mesh, bounds } of parts) {
+    // A smaller solid inside a closed outer surface can share its top plane.
+    // Keep the outer finish stable where the two faces compete for the same depth.
+    if (bounds.max.z - bounds.min.z <= tolerance) continue;
+    bounds.getCenter(center);
+    bounds.getSize(size);
+    const top = bounds.max.z;
+    while (parts[first].bounds.max.z < top - tolerance) first++;
+    const probes = [[center.x, center.y], [center.x - size.x*.3, center.y], [center.x + size.x*.3, center.y],
+      [center.x, center.y - size.y*.3], [center.x, center.y + size.y*.3]];
+    for (let i = first; i < parts.length; i++) {
+      const { mesh: outerMesh, bounds: outer } = parts[i];
+      if (outer.max.z > top + tolerance) break;
+      if (outer.min.z >= bounds.min.z - tolerance || outer.min.x >= bounds.min.x - tolerance ||
+        outer.max.x <= bounds.max.x + tolerance || outer.min.y >= bounds.min.y - tolerance ||
+        outer.max.y <= bounds.max.y + tolerance) continue;
+      if (Array.isArray(outerMesh.material) || outerMesh.material.transparent || outerMesh.material.alphaTest > 0 ||
+        (outerMesh.material instanceof THREE.MeshPhysicalMaterial && outerMesh.material.transmission > 0)) continue;
+      if (probes.every(([x, y]) => hitsTop(mesh, x, y, top) && hitsTop(outerMesh, x, y, top))) {
+        mesh.userData.coveredCap = true;
+        break;
+      }
+    }
+  }
+}
+
 function prepare(root: THREE.Object3D, name: string, kind: RenderModel['kind'], unit: string,
   unitFactor: number | null, warnings: string[]): RenderModel {
   const renderables: THREE.Mesh[] = [];
   root.updateWorldMatrix(true, true);
   root.traverse(object => {
-    if (!(object instanceof THREE.Mesh)) return;
+    if (!(object instanceof THREE.Mesh) || !object.visible) return;
+    for (let parent = object.parent; parent; parent = parent.parent) {
+      if (!parent.visible) return;
+    }
     const p = object.geometry.getAttribute('position');
     if (!p || p.count < 3) return;
     object.geometry.computeBoundingBox();
@@ -67,6 +109,7 @@ function prepare(root: THREE.Object3D, name: string, kind: RenderModel['kind'], 
   if (!renderables.length) throw new Error('文件里没有可渲染的网格面。');
   const bounds = new THREE.Box3();
   const group = new THREE.Group();
+  const parts: { mesh: THREE.Mesh; bounds: THREE.Box3 }[] = [];
   for (const original of renderables) {
     const mesh = original.clone(false);
     mesh.matrixAutoUpdate = false;
@@ -80,11 +123,15 @@ function prepare(root: THREE.Object3D, name: string, kind: RenderModel['kind'], 
     });
     styleRenderMesh(mesh);
     group.add(mesh);
-    bounds.expandByObject(mesh, true);
+    const partBounds = new THREE.Box3().setFromObject(mesh, true);
+    mesh.userData.workbenchBounds = partBounds;
+    bounds.union(partBounds);
+    if (kind === '3DM' && /^(Brep|Extrusion)$/.test(mesh.userData.objectType)) parts.push({ mesh, bounds: partBounds });
   }
   const size = bounds.getSize(new THREE.Vector3());
   const span = Math.max(...size);
   if (!Number.isFinite(span) || span <= 0) throw new Error('模型没有有效的几何范围。');
+  biasCoveredCaps(parts, span * 5e-7);
   const center = bounds.getCenter(new THREE.Vector3());
   // Keep exported dimensions in source units; normalize only scene coordinates.
   group.scale.setScalar(1 / span);

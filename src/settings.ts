@@ -29,7 +29,7 @@ export const settingsMarkup = `
           <label class="field">API Key<input id="assistant-key" type="password" maxlength="2048" autocomplete="new-password"></label>
           <div class="row cache-actions"><button id="assistant-test" type="button">测试连接</button>
             <label id="assistant-clear-label" hidden><input type="checkbox" id="assistant-clear-key"> 清除已保存的 Key</label></div>
-          <p class="hint">支持 Chat Completions 兼容接口。本机服务可留空 Key。发送时服务商会收到对话及部件名和参数。</p>
+          <p class="hint">支持 Chat Completions 兼容接口。本机服务可留空 Key。发送时服务商会收到对话和部件摘要，勾选后还会收到本轮预览图。</p>
         </div>
       </fieldset>
       <p id="settings-rhino" class="hint settings-rhino"></p>

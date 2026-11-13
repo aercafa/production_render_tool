@@ -231,10 +231,16 @@ async function jsonBody(req, limit) {
 export function createWorkbenchService({ authorize = localRequest, selectFolder, selectExport } = {}) {
   let exclusive = false, picking = false;
   let activeMesh;
+  const meshQueue = [];
+  function releaseExclusive() {
+    const next = meshQueue.shift();
+    if (next) next.start();
+    else exclusive = false;
+  }
   async function oneAtATime(fn) {
     if (exclusive) throw failure('本机正在处理模型或缓存，请稍后重试。',409);
     exclusive = true;
-    try { return await fn(); } finally { exclusive = false; }
+    try { return await fn(); } finally { releaseExclusive(); }
   }
   const prune = async () => {
       if (exclusive) return;
@@ -257,7 +263,9 @@ export function createWorkbenchService({ authorize = localRequest, selectFolder,
         if (route === 'GET /mesh/progress') {
           const job = activeMesh?.id === requestId ? activeMesh.job : null;
           const state = job ? await fs.readFile(path.join(job,'progress.json'),'utf8').then(JSON.parse).catch(() => null) : null;
-          json(res,200,state ?? (job ? {stage:'rhino'} : {}));
+          const position = meshQueue.findIndex(item => item.id === requestId);
+          json(res,200,state ?? (position >= 0 ? {stage:'queued', position:position+1} :
+            activeMesh?.id === requestId ? {stage:'rhino'} : {}));
           return;
         }
         const settings = await getSettings();
@@ -291,7 +299,7 @@ export function createWorkbenchService({ authorize = localRequest, selectFolder,
           json(res,200,{ connected:true });
         } else if (route === 'POST /assistant/chat') {
           if (!settings.assistant?.url) throw failure('请在设置中保存 API URL 和模型名。');
-          const input = await jsonBody(req, 256 * 1024);
+          const input = await jsonBody(req, 640 * 1024);
           try { json(res,200,await chatAssistant(settings.assistant, input)); }
           catch (error) { throw failure(error.message, 502); }
         } else if (route === 'POST /cache/clear') {
@@ -326,14 +334,33 @@ export function createWorkbenchService({ authorize = localRequest, selectFolder,
           const exe = rhinoExe();
           if (!exe) throw failure('本机未找到 Rhino 8，无法自动生成曲面网格。可导入已带网格的 3DM 或 OBJ。',503);
           if (req.headers['content-type'] !== 'application/octet-stream') throw failure('无效的 3DM 请求。',415);
+          if (meshQueue.length >= 3) throw failure('网格处理队列已满，请等待当前任务完成。',429);
+          const inputPromise = body(req,LIMIT).then(input => ({input}), error => ({error}));
+          if (exclusive) {
+            const granted = await new Promise(resolve => {
+              const item = {id:requestId, start:() => { res.off('close', cancel); resolve(true); }};
+              const cancel = () => {
+                const index = meshQueue.indexOf(item);
+                if (index >= 0) meshQueue.splice(index,1);
+                resolve(false);
+              };
+              meshQueue.push(item);
+              res.once('close',cancel);
+            });
+            if (!granted) return;
+            if (res.destroyed) { releaseExclusive(); return; }
+            exclusive = false;
+          }
           await oneAtATime(async () => {
-            const input = await body(req,LIMIT);
+            const {input,error} = await inputPromise;
+            if (error) throw error;
             if (input.subarray(0,24).toString('ascii') !== '3D Geometry File Format ') throw failure('文件不是有效的 3DM。',422);
-            await sweep(settings.cacheLocation);
+            const {cacheLocation} = await getSettings();
+            await sweep(cacheLocation);
             activeMesh = {id:requestId,job:null};
             let converted;
             try {
-              converted = await convertMesh(input,settings.cacheLocation,exe,job => { activeMesh.job = job; });
+              converted = await convertMesh(input,cacheLocation,exe,job => { activeMesh.job = job; });
             } finally { activeMesh = undefined; }
             const {output,cached} = converted;
             const {size} = await fs.stat(output);

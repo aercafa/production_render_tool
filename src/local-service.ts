@@ -33,8 +33,9 @@ export async function prepareMesh(body: ArrayBuffer, onProgress?: OperationProgr
   const poll = async () => {
     try {
       const response = await request('mesh/progress?id=' + id, { signal: tracking.signal });
-      const state = await response.json() as { stage?: string; completed?: number; total?: number };
+      const state = await response.json() as { stage?: string; completed?: number; total?: number; position?: number };
       if (tracking.signal.aborted) return;
+      if (state.stage === 'queued') onProgress?.('等待前面的网格或缓存任务完成…', undefined, '排队第 ' + state.position + ' 位');
       if (state.stage === 'rhino') onProgress?.('正在启动 Rhino 网格处理…');
       if (state.stage === 'meshing' && state.total && state.completed !== undefined) {
         const percent = Math.round(state.completed / state.total * 100);
@@ -74,8 +75,8 @@ export async function testAssistant(config: AssistantSettings) {
 
 export type ChatMessage = { role: 'user' | 'assistant'; content: string };
 
-export async function askAssistant(messages: ChatMessage[], scene: object): Promise<{ reply: string; changes: unknown[] }> {
-  const response = await request('assistant/chat', { method: 'POST', body: JSON.stringify({ messages, scene }),
+export async function askAssistant(messages: ChatMessage[], scene: object, preview?: string): Promise<{ reply: string; changes: unknown[] }> {
+  const response = await request('assistant/chat', { method: 'POST', body: JSON.stringify({ messages, scene, preview }),
     headers: { 'Content-Type': 'application/json' } });
   return response.json();
 }

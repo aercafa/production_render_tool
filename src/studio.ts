@@ -62,9 +62,9 @@ function glassMaterial(source: LitMaterial, box: THREE.Box3) {
   const other = range.y >= range.z ? 1 : 2;
   const epsilon = Math.max(...range) * 1e-6 || 1e-6;
   range.max(new THREE.Vector3(epsilon, epsilon, epsilon));
-  if (glass instanceof THREE.MeshStandardMaterial && !glass.userData.rhinoPbr) {
-    glass.roughness = .17;
-    glass.metalness = 0;
+  if (glass instanceof THREE.MeshStandardMaterial) {
+    if (!glass.roughnessMap) glass.roughness = Math.max(glass.roughness, glass.userData.rhinoPbr ? .26 : .17);
+    if (!glass.userData.rhinoPbr) glass.metalness = 0;
   } else if (glass instanceof THREE.MeshPhongMaterial) {
     glass.shininess = 70;
   }
@@ -135,7 +135,8 @@ export function premiumSurface(source: THREE.Material, objectName: string) {
   const label = (source.name + ' ' + objectName).replaceAll('_', ' ');
   if (/喷涂|烤漆|粉末涂层|powder|paint|coating|lacquer/i.test(label)) return 'coating';
   if (/拉丝|brushed/i.test(label)) return 'brushed';
-  if (/裸铝|铝合金|不锈钢|青铜|黄铜|镀铬|\b(?:aluminium|aluminum|steel|chrome|bronze|brass|copper|metal)\b/i.test(label)) return 'metal';
+  if (/亚光金属|哑光金属|matte[ -]+metal/i.test(label)) return 'matte-metal';
+  if (/金属|裸铝|铝合金|不锈钢|青铜|黄铜|镀铬|\b(?:aluminium|aluminum|steel|chrome|bronze|brass|copper|metal)\b/i.test(label)) return 'metal';
   return 'source';
 }
 
@@ -164,12 +165,15 @@ export function premiumMaterial(source: THREE.Material, finish: ReturnType<typeo
     m.clearcoat = .58;
     m.clearcoatRoughness = .24;
     m.roughness = .24;
-  } else if ((finish === 'metal' || finish === 'brushed') && !m.metalnessMap && !m.transparent) {
+  } else if ((finish === 'metal' || finish === 'brushed' || finish === 'matte-metal') && !m.metalnessMap && !m.transparent) {
     const metal = premiumStudio.legacyMetal;
     m.metalness = Math.max(m.metalness, metal.metalness);
     if (!m.roughnessMap) {
-      const maxRoughness = finish === 'brushed' ? metal.brushedMaxRoughness : metal.maxRoughness;
-      m.roughness = THREE.MathUtils.clamp(m.roughness, metal.minRoughness, maxRoughness);
+      if (finish === 'matte-metal') m.roughness = Math.max(m.roughness, .48);
+      else {
+        const maxRoughness = finish === 'brushed' ? metal.brushedMaxRoughness : metal.maxRoughness;
+        m.roughness = THREE.MathUtils.clamp(m.roughness, metal.minRoughness, maxRoughness);
+      }
     }
     if (finish === 'brushed' && !m.anisotropyMap) m.anisotropy = Math.max(m.anisotropy, metal.anisotropy);
   } else if (finish === 'coating') {

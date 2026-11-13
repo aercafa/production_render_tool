@@ -35,11 +35,15 @@ test('渲染助手通过兼容 API 修改颜色和程序化木纹，支持确认
     const context = isTest ? null : JSON.parse(body.messages[1].content.slice('当前场景数据：'.length));
     const base = context?.materials.find((material: { name: string }) => material.name === 'base');
     const frame = context?.materials.find((material: { name: string }) => material.name === 'frame');
-    const request = body.messages.at(-1).content;
+    const last = body.messages.at(-1).content;
+    const request = typeof last === 'string' ? last : last[0].text;
+    const localFrame = context?.parts.find((part: { name: string }) => part.name === '立柱');
     const changes = request === '改一个不存在的部件'
       ? [{ target:'bad-id', property:'color', value:'#ff0000' }]
       : request === '再降低阴影'
       ? [{ target:'scene', property:'shadow', value:.2 }]
+      : request === '只把立柱改成绿色'
+      ? [{ target:localFrame?.id ?? 'bad-id', property:'color', value:'#00bc00' }]
       : request === '共用框体改红'
       ? [{ target:frame?.id ?? 'bad-id', property:'color', value:'#e30000' }]
       : request === '改成亚光浅橡木，加细节'
@@ -55,7 +59,9 @@ test('渲染助手通过兼容 API 修改颜色和程序化木纹，支持确认
     if (request === '把底座改成红色') await new Promise(resolve => setTimeout(resolve, 250));
     res.writeHead(req.url === '/v1/chat/completions' && req.headers.authorization === 'Bearer ' + apiKey ? 200 : 401,
       { 'Content-Type':'application/json' });
-    res.end(JSON.stringify({ choices:[{ message:{ content:isTest ? 'OK' : JSON.stringify({ reply:'这是本轮建议。', changes }) } }] }));
+    const proposal = JSON.stringify({ reply:'这是本轮建议。', changes });
+    const content = isTest ? 'OK' : request === '只把立柱改成绿色' ? '这是一条说明。\n```json\n' + proposal + '\n```' : proposal;
+    res.end(JSON.stringify({ choices:[{ message:{ content } }] }));
   });
   await new Promise<void>(resolve => provider.listen(0, '127.0.0.1', resolve));
   try {
@@ -75,7 +81,12 @@ test('渲染助手通过兼容 API 修改颜色和程序化木纹，支持确认
     const send = page.getByRole('button',{name:'发送',exact:true});
     const preview = () => canvasHash(page, '#base');
     const before = await preview();
-    const scope = page.getByRole('combobox',{name:'要修改的模型材质'});
+    const view = page.getByRole('combobox', { name:'主视角' });
+    await view.selectOption({label:'后左低轴测'});
+    const beforeFromRear = await preview();
+    expect(beforeFromRear).not.toBe(before);
+    await view.selectOption({label:'前右低轴测'});
+    const scope = page.getByRole('combobox',{name:'要修改的范围'});
     await expect(scope.locator('option', { hasText:'frame（2 处）' })).toHaveCount(1);
     await scope.selectOption({label:'base（1 处）'});
     await input.fill('把底座改成红色');
@@ -95,13 +106,20 @@ test('渲染助手通过兼容 API 修改颜色和程序化木纹，支持确认
     expect(await canvasHash(page, '#compare-frame')).toBe(before);
     await page.keyboard.up('Space');
     await expect(compare).toHaveAttribute('aria-pressed','false');
+    await view.selectOption({label:'后左低轴测'});
+    const renderUndo = page.getByRole('button', {name:'撤销渲染'});
+    await expect(renderUndo).toBeEnabled();
+    await expect(compare).toBeEnabled();
+    expect(await preview()).not.toBe(beforeFromRear);
     const box = (await compare.boundingBox())!;
     await page.mouse.move(box.x + box.width/2, box.y + box.height/2);
     await page.mouse.down();
     await expect(page.getByText('修改前',{exact:true})).toBeVisible();
+    expect(await canvasHash(page, '#compare-frame')).toBe(beforeFromRear);
     await page.mouse.move(box.x - 30, box.y + box.height/2);
     await page.mouse.up();
     await expect(page.getByText('修改前',{exact:true})).toBeHidden();
+    await view.selectOption({label:'前右低轴测'});
     expect(await preview()).not.toBe(before);
     const download = page.waitForEvent('download');
     await page.getByRole('button',{name:'导出 PNG'}).click();
@@ -130,9 +148,13 @@ test('渲染助手通过兼容 API 修改颜色和程序化木纹，支持确认
     expect(requests.at(-1)?.body.messages[1].content).toContain('"color":"#d40000"');
     const undo = page.getByRole('button',{name:'撤销助手修改'});
     await undo.click();
-    await undo.click();
+    await view.selectOption({label:'后左低轴测'});
+    await renderUndo.click();
     await expect(page.locator('#assistant-feedback')).toContainText('已撤销');
+    await expect(view).toHaveValue('3');
     await expect(page.getByRole('slider',{name:'曝光'})).toHaveValue('0');
+    expect(await preview()).toBe(beforeFromRear);
+    await view.selectOption({label:'前右低轴测'});
     expect(await preview()).toBe(before);
     await input.fill('改一个不存在的部件');
     await send.click();
@@ -231,6 +253,29 @@ test('渲染助手通过兼容 API 修改颜色和程序化木纹，支持确认
     });
     expect(framePixels[0]).toBeGreaterThan(10);
     expect(framePixels[1]).toBeGreaterThan(10);
+    await scope.selectOption('');
+    await page.getByRole('button',{name:'在图上选部件'}).click();
+    const paper = (await page.locator('#overlay').boundingBox())!;
+    await page.mouse.click(paper.x + paper.width * 744/1200, paper.y + paper.height * 590/800);
+    await expect(page.locator('#assistant-feedback')).toContainText('已选中：立柱');
+    await page.getByLabel('随本轮发送预览图（需视觉模型）').check();
+    const cabinetPixels = () => page.locator('#base').evaluate((canvas: HTMLCanvasElement) => {
+      const ctx = canvas.getContext('2d')!;
+      return [ [709,450], [744,590] ].map(([x,y]) => Array.from(ctx.getImageData(
+        Math.round(x*canvas.width/1200),Math.round(y*canvas.height/800),1,1).data));
+    });
+    const [housingBefore, columnBefore] = await cabinetPixels();
+    await input.fill('只把立柱改成绿色');
+    await send.click();
+    await expect(page.locator('#assistant-changes')).toContainText('立柱（1 处）');
+    await input.fill('确认');
+    await send.click();
+    await expect(page.locator('#assistant-feedback')).toContainText('已应用');
+    const [housingAfter, columnAfter] = await cabinetPixels();
+    expect(housingAfter).toEqual(housingBefore);
+    expect(columnAfter).not.toEqual(columnBefore);
+    expect(columnAfter[1]).toBeGreaterThan(columnAfter[0]);
+    expect(JSON.stringify(requests.at(-1)?.body.messages.at(-1)?.content)).toContain('data:image/jpeg;base64,');
   } finally {
     provider.closeAllConnections();
     await new Promise<void>(resolve => provider.close(() => resolve()));

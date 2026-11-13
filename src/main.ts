@@ -10,7 +10,7 @@ import { bindSettings, settingsMarkup } from './settings';
 import type { RenderStyle } from './view-effects';
 import { exposureControl } from './render-config';
 import { assistantMarkup, bindAssistant } from './assistant-panel';
-import { defaultTuning, type SceneValues } from './assistant-edits';
+import { defaultTuning, type AssistantEdits, type SceneValues } from './assistant-edits';
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = [
@@ -27,9 +27,10 @@ app.innerHTML = [
   mainViews.map((view, i) => '<option value="' + i + '">' + view.label + '</option>').join(''),
   '</select></label><div class="tool-group" role="group" aria-label="标注工具"><button id="select-tool" aria-pressed="true">选择</button>',
   '<button id="draw" aria-pressed="false">绘制辅助线</button></div><div class="tool-group" role="group" aria-label="标注历史">',
-  '<button id="undo" title="Ctrl+Z" disabled>撤回</button><button id="redo" title="Ctrl+Shift+Z" disabled>重做</button></div>',
+  '<button id="undo" title="撤回标注 (Ctrl+Z)" disabled>撤回</button><button id="redo" title="重做标注 (Ctrl+Shift+Z)" disabled>重做</button></div>',
+  '<div class="tool-group" role="group" aria-label="渲染修改历史"><button id="render-undo" type="button" title="撤销上一次助手修改" disabled>撤销渲染</button>',
   '<button id="assistant-compare" type="button" aria-label="按住对比修改前" title="按住看修改前，松开恢复" aria-pressed="false" disabled>',
-  '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M12 3v18M7 9v6M17 9v6"/></svg> 对比</button></div></div>',
+  '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M12 3v18M7 9v6M17 9v6"/></svg> 对比</button></div></div></div>',
   '<div class="status" id="status"><div class="status-content"><span id="message" role="status" aria-live="polite">请选择或拖入模型。</span>',
   '<div id="operation-progress" class="operation-progress" hidden><progress id="progress" aria-label="处理进度"></progress><span id="progress-count" aria-hidden="true"></span></div></div></div>',
   '<div class="stage"><div class="paper" id="paper"><canvas id="base" width="1200" height="800" aria-label="模型四视图"></canvas>',
@@ -118,27 +119,63 @@ const selectedView = () => Number(viewChoice.value);
 const selectedStyle = () => styleChoice.value as RenderStyle;
 let tuning = { ...defaultTuning };
 let assistantRendering = false;
-let hasComparison = false;
+let pickingPart = false;
+let comparison: ReturnType<AssistantEdits['beforeLastEdit']>;
+let comparisonView = -1;
 const compareButton = el<HTMLButtonElement>('assistant-compare');
 const compareFrame = el<HTMLCanvasElement>('compare-frame');
 function showBefore(show: boolean) {
-  const active = show && !compareButton.disabled;
+  let active = show && !compareButton.disabled;
+  if (active) {
+    try { renderComparison(); }
+    catch { active = false; status('暂时无法绘制对比画面，请重试。', 'error'); }
+  }
   compareFrame.hidden = el('compare-badge').hidden = !active;
   compareButton.setAttribute('aria-pressed', String(active));
 }
 function resetComparison() {
-  hasComparison = false;
+  comparison = undefined;
+  comparisonView = -1;
   showBefore(false);
   compareFrame.width = compareFrame.height = 0;
   compareButton.disabled = true;
 }
-function captureComparison() {
+function sizeComparison() {
   compareFrame.width = base.width;
   compareFrame.height = base.height;
-  compareFrame.getContext('2d')!.drawImage(base, 0, 0);
+  return compareFrame.getContext('2d')!;
+}
+function renderComparison() {
+  const view = selectedView();
+  if (!renderer || !comparison || (view === comparisonView && compareFrame.width === base.width)) return;
+  const { scene, overrides } = comparison;
+  comparisonView = -1;
+  try {
+    renderer.setTuning(scene);
+    renderer.setMaterialOverrides(overrides);
+    renderer.preview(sizeComparison(), previewScale, view, scene.style, scene.exposure);
+    comparisonView = view;
+  } finally {
+    renderer.setTuning(tuning);
+    renderer.setMaterialOverrides(assistant.overrides());
+  }
 }
 const assistant = bindAssistant({
   scene: (): SceneValues => ({ ...tuning, style: selectedStyle(), exposure: exposureSlider.valueAsNumber }),
+  picking: enabled => {
+    pickingPart = enabled;
+    overlay.dataset.pick = String(enabled);
+    if (enabled) { cancelInteraction(); drawing(false); }
+  },
+  previewImage: () => {
+    const image = document.createElement('canvas');
+    image.width = 1008;
+    image.height = 672;
+    const context = image.getContext('2d')!;
+    context.imageSmoothingQuality = 'high';
+    context.drawImage(base,0,0,image.width,image.height);
+    return image.toDataURL('image/jpeg', .78);
+  },
   render: async (scene, edits, compare) => {
     if (compare) {
       if (exposureFrame) {
@@ -146,9 +183,10 @@ const assistant = bindAssistant({
         exposureFrame = 0;
         renderPreview();
       }
-      captureComparison();
+      sizeComparison().drawImage(base, 0, 0);
+      comparisonView = selectedView();
     }
-    else resetComparison();
+    else comparisonView = -1;
     assistantRendering = true;
     showBefore(false);
     const refreshing = el('render-refresh');
@@ -163,7 +201,7 @@ const assistant = bindAssistant({
       renderer?.setMaterialOverrides(edits.overrides());
       updateExposure();
       renderPreview();
-      hasComparison = compare;
+      comparison = edits.beforeLastEdit();
       status(compare ? '渲染已更新 · 按住「对比」查看修改前' : '已恢复上一次助手修改。', 'success');
       if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {
         base.animate([{ opacity:.65 }, { opacity:1 }], { duration:220 });
@@ -224,6 +262,7 @@ function hideProgress() {
 }
 
 function drawing(enabled: boolean) {
+  if (enabled && pickingPart) assistant.cancelPicking();
   drawMode = enabled;
   overlay.dataset.tool = enabled ? 'line' : '';
   overlay.dataset.target = '';
@@ -250,13 +289,14 @@ function fitPreview() {
   if (exportPending || assistantRendering) return;
   const cssWidth = paper.getBoundingClientRect().width;
   if (cssWidth === 0) return;
-  const width = Math.max(3, Math.ceil(Math.min(3000, cssWidth * window.devicePixelRatio) / 3) * 3);
+  const width = Math.max(3, Math.ceil(Math.min(3000, cssWidth * window.devicePixelRatio * 1.25) / 3) * 3);
   if (width === base.width) return;
   base.width = overlay.width = width;
   base.height = overlay.height = width / 3 * 2;
   previewScale = width / SHEET_WIDTH;
   renderPreview();
   redraw();
+  if (!compareFrame.hidden) showBefore(true);
 }
 
 function updateButtons() {
@@ -274,7 +314,7 @@ function updateButtons() {
   styleChoice.disabled = viewChoice.disabled;
   exposureSlider.disabled = viewChoice.disabled || selectedStyle() === 'clay';
   resetExposure.disabled = exposureSlider.disabled || exposureSlider.valueAsNumber === exposureControl.default;
-  compareButton.disabled = !hasComparison || busyRendering || blocked;
+  compareButton.disabled = !comparison || busyRendering || blocked;
   if (compareButton.disabled) showBefore(false);
   assistant.setLocked(busyRendering || blocked);
 }
@@ -408,7 +448,11 @@ undoMarkButton.onclick = undo;
 redoButton.onclick = redo;
 drawButton.onclick = drawPanel.onclick = () => { cancelInteraction(); drawing(!drawMode); };
 selectButton.onclick = () => { cancelInteraction(); drawing(false); };
-viewChoice.onchange = () => { resetComparison(); renderPreview(); redraw(); };
+viewChoice.onchange = () => {
+  renderPreview();
+  redraw();
+  if (!compareFrame.hidden) showBefore(true);
+};
 styleChoice.onchange = () => { updateButtons(); renderPreview(); };
 function updateExposure() {
   const value = exposureSlider.valueAsNumber;
@@ -446,6 +490,7 @@ labelSide.onchange = () => {
 
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape') {
+    if (pickingPart) { assistant.cancelPicking(); return; }
     if (cancelInteraction()) return;
     if (drawMode) { drawing(false); return; }
     if (selected !== null) { selectMark(null); return; }
@@ -508,6 +553,12 @@ overlay.addEventListener('pointerdown', event => {
   if (!model || event.button !== 0 || busy || interaction) return;
   finishTextEdit();
   const p = point(event);
+  if (pickingPart) {
+    const hit = renderer?.pickPart(p, selectedView());
+    if (hit) assistant.pickPart(hit.mesh, hit.index);
+    event.preventDefault();
+    return;
+  }
   if (drawMode) {
     const a = inside(p);
     draft = { id: markId, a, b: a, value: '', mode: nextLineMode, side: 'auto' };

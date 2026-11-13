@@ -106,9 +106,30 @@ void main() {
 }
 `;
 
+// On a face viewed head-on the projected view direction has zero length.
+// A stable tangent keeps area-light highlights continuous across orthographic faces.
+const stableAreaLight = THREE.ShaderChunk.lights_physical_pars_fragment.replace(
+  'T1 = normalize( V - N * dot( V, N ) );',
+  `vec3 projectedView = V - N * dot( V, N );
+   vec3 axis = abs( N.x ) < 0.9 ? vec3( 1.0, 0.0, 0.0 ) : vec3( 0.0, 1.0, 0.0 );
+   T1 = normalize( dot( projectedView, projectedView ) > 1e-8 ? projectedView : cross( axis, N ) );`,
+);
+
+function stabilizeAreaLight(material: THREE.Material) {
+  const compile = material.onBeforeCompile;
+  const key = material.customProgramCacheKey();
+  material.onBeforeCompile = function (shader, renderer) {
+    compile.call(this, shader, renderer);
+    shader.fragmentShader = shader.fragmentShader.replace('#include <lights_physical_pars_fragment>', stableAreaLight);
+  };
+  material.customProgramCacheKey = () => key + ':stable-area-light';
+}
+
 type RenderMaterial = THREE.Material | THREE.Material[];
 type Variant = { mesh: THREE.Mesh; source: RenderMaterial; premium: RenderMaterial;
-  studio: RenderMaterial; identity: RenderMaterial; emission: RenderMaterial };
+  studio: RenderMaterial; normal: THREE.Material; identity: RenderMaterial; emission: RenderMaterial };
+
+const coveredCapOffset = 128;
 
 function overrideMaterial(material: THREE.Material, changes: Partial<MaterialValues>, mesh: THREE.Mesh) {
   if (!(material instanceof THREE.MeshStandardMaterial || material instanceof THREE.MeshPhongMaterial)) return material;
@@ -194,6 +215,8 @@ export class ViewEffects {
     depthTexture: new THREE.DepthTexture(1, 1, THREE.UnsignedIntType),
   });
   private readonly normalMaterial = new THREE.MeshNormalMaterial({ side: THREE.DoubleSide });
+  private readonly coveredCapNormal = new THREE.MeshNormalMaterial({ side: THREE.DoubleSide,
+    polygonOffset:true, polygonOffsetUnits:coveredCapOffset });
   private readonly identity = dataTarget();
   private readonly emission = new THREE.WebGLRenderTarget(1,1,{ type:THREE.HalfFloatType });
   private readonly blurX = new THREE.WebGLRenderTarget(1,1,{ type:THREE.HalfFloatType, depthBuffer:false });
@@ -271,25 +294,31 @@ export class ViewEffects {
         let base = variants.get(finish);
         if (!base) {
           base = premiumMaterial(material, finish);
-          if (base !== material) own(base);
+          if (base !== material) { stabilizeAreaLight(base); own(base); }
           variants.set(finish, base);
         }
         const change = edits?.get(index);
         if (!change) return base;
+        if (change.pattern === 'source' && Object.keys(change).length === 1) return base;
         const edited = overrideMaterial(base, change, object);
-        return edited === base ? base : own(edited);
+        if (edited === base) return base;
+        if (change.pattern && change.pattern !== 'source') stabilizeAreaLight(edited);
+        return own(edited);
       });
       const premiumAt = (index: number) => Array.isArray(premium) ? premium[index] : premium;
       object.castShadow = (Array.isArray(premium) ? premium : [premium]).every(m =>
         !m.transparent && !(m instanceof THREE.MeshPhysicalMaterial && m.transmission > .01));
       object.receiveShadow = true;
-      this.variants.push({
+      const variant: Variant = {
         mesh:object,source,premium,
+        normal:object.userData.coveredCap ? this.coveredCapNormal : this.normalMaterial,
         studio:map((material, index) => {
           const change = edits?.get(index);
           if (!change) return material;
+          if (change.pattern === 'source' && Object.keys(change).length === 1) return material;
           if (change.pattern || change.roughness !== undefined || change.metalness !== undefined ||
-              change.specularIntensity !== undefined || change.clearcoat !== undefined) return premiumAt(index);
+              change.specularIntensity !== undefined || change.clearcoat !== undefined ||
+              change.transmission !== undefined || change.ior !== undefined) return premiumAt(index);
           const edited = overrideMaterial(material, change, object);
           return edited === material ? material : own(edited);
         }),
@@ -314,11 +343,31 @@ export class ViewEffects {
           emitters.set(m,material);
           return material;
         }),
-      });
+      };
+      if (object.userData.coveredCap) {
+        const biased = new Map<THREE.Material, THREE.Material>();
+        const bias = (material: THREE.Material) => {
+          let copy = biased.get(material);
+          if (!copy) {
+            copy = own(material.clone());
+            copy.onBeforeCompile = material.onBeforeCompile;
+            copy.customProgramCacheKey = material.customProgramCacheKey;
+            copy.polygonOffset = true;
+            copy.polygonOffsetUnits = coveredCapOffset;
+            biased.set(material, copy);
+          }
+          return copy;
+        };
+        for (const pass of ['studio', 'premium', 'identity', 'emission'] as const) {
+          const material = variant[pass];
+          variant[pass] = Array.isArray(material) ? material.map(bias) : bias(material);
+        }
+      }
+      this.variants.push(variant);
     });
   }
 
-  private apply(pass:'source'|'studio'|'premium'|'identity'|'emission') {
+  private apply(pass:'source'|'studio'|'premium'|'normal'|'identity'|'emission') {
     for (const item of this.variants) item.mesh.material = item[pass];
   }
 
@@ -336,7 +385,6 @@ export class ViewEffects {
   render(renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.OrthographicCamera,
     style: RenderStyle, w: number, h: number, pixelsPerUnit: number, k: number, tuning: RenderTuning) {
     const background = scene.background;
-    const override = scene.overrideMaterial;
     const oldShadow = renderer.shadowMap.enabled;
     const bloom = style === 'premium' && this.hasEmission;
     if (style !== 'clay') this.beauty.setSize(w,h);
@@ -347,13 +395,12 @@ export class ViewEffects {
         renderer.setRenderTarget(this.beauty);
         renderer.render(scene,camera);
       }
-      scene.overrideMaterial = this.normalMaterial;
+      this.apply('normal');
       scene.background = null;
       renderer.shadowMap.enabled = false;
       renderer.setClearColor(0x000000, 0);
       renderer.setRenderTarget(this.normals);
       renderer.render(scene,camera);
-      scene.overrideMaterial = null;
       if (style === 'clay') {
         this.apply('identity');
         this.identity.setSize(w,h);
@@ -370,7 +417,6 @@ export class ViewEffects {
       this.apply('source');
       renderer.shadowMap.enabled = oldShadow;
       scene.background = background;
-      scene.overrideMaterial = override;
       renderer.setRenderTarget(null);
     }
     const u = this.material.uniforms;

@@ -318,6 +318,19 @@ export class SheetRenderer {
     if (this.model) this.scene.remove(this.model.group);
     this.model = model;
     this.scene.add(model.group);
+    const anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
+    model.group.traverse(object => {
+      if (!(object instanceof THREE.Mesh)) return;
+      for (const material of Array.isArray(object.material) ? object.material : [object.material]) {
+        if (!(material instanceof THREE.MeshStandardMaterial || material instanceof THREE.MeshPhongMaterial)) continue;
+        for (const texture of [material.map, material.emissiveMap, material.normalMap]) {
+          if (texture && texture.anisotropy < anisotropy) {
+            texture.anisotropy = anisotropy;
+            texture.needsUpdate = true;
+          }
+        }
+      }
+    });
     this.setMaterialOverrides();
   }
 
@@ -328,6 +341,39 @@ export class SheetRenderer {
 
   setTuning(tuning: RenderTuning) {
     this.tuning = tuning;
+  }
+
+  pickPart(point: Point, preset: number) {
+    if (!this.model) return;
+    const { size, scale } = sceneLayout(this.model);
+    const main = mainGeometry(size, preset);
+    const views = [
+      { rect:axo, direction:main.direction, up:orthoUp, scale:main.scale },
+      { rect:top, direction:new THREE.Vector3(0,0,1), up:new THREE.Vector3(0,1,0), scale },
+      { rect:front, direction:new THREE.Vector3(0,-1,0), up:orthoUp, scale },
+      { rect:right, direction:new THREE.Vector3(1,0,0), up:orthoUp, scale },
+    ];
+    const view = views.find(({rect}) => point.x >= rect.x && point.x <= rect.x + rect.w &&
+      point.y >= rect.y && point.y <= rect.y + rect.h);
+    if (!view) return;
+    const {rect,direction,up} = view;
+    const camera = this.camera(rect, direction, up, view.scale);
+    camera.updateMatrixWorld();
+    this.model.group.updateMatrixWorld(true);
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(new THREE.Vector2(2*(point.x-rect.x)/rect.w-1,1-2*(point.y-rect.y)/rect.h),camera);
+    const hit = ray.intersectObjects(this.model.group.children,false)[0];
+    if (hit?.object instanceof THREE.Mesh) return { mesh:hit.object, index:hit.face?.materialIndex ?? 0 };
+  }
+
+  private camera(rect: Rect, direction: THREE.Vector3, up: THREE.Vector3, scale: number) {
+    const width = rect.w / scale, height = rect.h / scale;
+    // The normalized model fits inside a radius of sqrt(3)/2 around the origin.
+    const camera = new THREE.OrthographicCamera(-width / 2, width / 2, height / 2, -height / 2, 3, 5);
+    camera.position.copy(direction).multiplyScalar(4);
+    camera.up.copy(up);
+    camera.lookAt(0, 0, 0);
+    return camera;
   }
 
   private setLightStyle(style: RenderStyle) {
@@ -348,7 +394,7 @@ export class SheetRenderer {
   }
 
   preview(ctx: CanvasRenderingContext2D, k: number, preset: number, style: RenderStyle, exposure: number) {
-    const factor = Math.max(1, Math.min(2, 3600 / ctx.canvas.width));
+    const factor = Math.max(1, Math.min(3, 4200 / ctx.canvas.width));
     if (factor <= 1) { this.render(ctx,k,preset,style,exposure); return; }
     const buffer = this.previewBuffer;
     const width = Math.floor(ctx.canvas.width*factor/3)*3;
@@ -391,11 +437,7 @@ export class SheetRenderer {
     const w = Math.min(region.x + region.w, fullX + fullW) - x;
     const h = Math.min(region.y + region.h, fullY + fullH) - y;
     if (w <= 0 || h <= 0) return;
-    const width = rect.w / scale, height = rect.h / scale;
-    const camera = new THREE.OrthographicCamera(-width / 2, width / 2, height / 2, -height / 2, .01, 12);
-    camera.position.copy(direction).multiplyScalar(4);
-    camera.up.copy(up);
-    camera.lookAt(0, 0, 0);
+    const camera = this.camera(rect,direction,up,scale);
     camera.setViewOffset(fullW, fullH, x - fullX, y - fullY, w, h);
     this.renderer.setSize(w, h, false);
     const gl = this.renderer.getContext();

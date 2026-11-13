@@ -22,7 +22,9 @@ export const assistantMarkup = `
     </div>
     <form id="assistant-form" class="assistant-form">
       <p id="assistant-feedback" class="hint" aria-live="polite"></p>
-      <label class="field">要修改的模型材质<select id="assistant-scope"></select></label>
+      <label class="field">要修改的范围<select id="assistant-scope"></select></label>
+      <button id="assistant-pick" type="button" aria-pressed="false">在图上选部件</button>
+      <label class="assistant-vision"><input id="assistant-vision" type="checkbox"> 随本轮发送预览图（需视觉模型）</label>
       <label class="field"><span class="assistant-input-label">描述想要的效果</span>
         <textarea id="assistant-input" maxlength="3000" rows="3" placeholder="例如：把所选材质改成深胡桃木，纹路细一点。"></textarea></label>
       <div class="row assistant-actions"><button id="assistant-undo" type="button">撤销助手修改</button>
@@ -33,6 +35,8 @@ export const assistantMarkup = `
 export function bindAssistant(options: {
   scene: () => SceneValues;
   render: (scene: SceneValues, edits: AssistantEdits, compare: boolean) => Promise<void>;
+  picking: (enabled: boolean) => void;
+  previewImage: () => string;
 }) {
   const get = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
   const chat = get('assistant-chat');
@@ -43,6 +47,8 @@ export function bindAssistant(options: {
   const send = get<HTMLButtonElement>('assistant-send');
   const apply = get<HTMLButtonElement>('assistant-apply');
   const undo = get<HTMLButtonElement>('assistant-undo');
+  const pick = get<HTMLButtonElement>('assistant-pick');
+  const vision = get<HTMLInputElement>('assistant-vision');
   const proposal = get('assistant-proposal');
   const changesList = get('assistant-changes');
   const setup = get('assistant-setup');
@@ -58,6 +64,13 @@ export function bindAssistant(options: {
   let ready = false;
   let locked = false;
   let processing = '';
+  let picking = false;
+
+  function setPicking(value: boolean) {
+    picking = value;
+    pick.setAttribute('aria-pressed', String(value));
+    options.picking(value);
+  }
 
   function message(text: string, error = false) {
     feedback.textContent = text;
@@ -75,7 +88,11 @@ export function bindAssistant(options: {
     send.disabled = !ready || !!processing || locked || !input.value.trim();
     apply.disabled = locked || !!processing;
     undo.disabled = locked || !!processing || !edits?.canUndo;
+    get<HTMLButtonElement>('render-undo').disabled = undo.disabled;
     scope.disabled = !model || !!processing || locked;
+    pick.disabled = scope.disabled;
+    vision.disabled = scope.disabled;
+    if (pick.disabled && picking) setPicking(false);
     get<HTMLButtonElement>('assistant-new').disabled = !!processing && !requesting;
     input.disabled = !ready;
     send.textContent = requesting ? '等待回复…' : '发送';
@@ -105,6 +122,10 @@ export function bindAssistant(options: {
         const name = material.name + '（' + material.slots.length + ' 处）';
         scope.append(new Option(name, material.id));
       }
+      const group = document.createElement('optgroup');
+      group.label = '局部部件';
+      for (const part of edits.parts.values()) group.append(new Option(part.name + ' · ' + part.id, part.id));
+      scope.append(group);
     }
     return edits;
   }
@@ -129,7 +150,12 @@ export function bindAssistant(options: {
     if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.isComposing && !send.disabled) form.requestSubmit();
   };
   scope.onchange = () => {
-    if (pending) { pending = undefined; message('所选材质已切换，请重新发送要应用的修改。'); update(); }
+    setPicking(false);
+    if (pending) { pending = undefined; message('编辑范围已切换，请重新发送要应用的修改。'); update(); }
+  };
+  pick.onclick = () => {
+    setPicking(!picking);
+    if (picking) message('请在预览中点击要编辑的表面。');
   };
   get('assistant-discard').onclick = () => {
     pending = undefined;
@@ -164,8 +190,8 @@ export function bindAssistant(options: {
     }
   }
   apply.onclick = applyPending;
-  undo.onclick = async () => {
-    if (!edits?.canUndo || locked || requesting) return;
+  undo.onclick = get<HTMLButtonElement>('render-undo').onclick = async () => {
+    if (undo.disabled || !edits) return;
     pending = undefined;
     message('');
     processing = '正在恢复材质…';
@@ -192,8 +218,10 @@ export function bindAssistant(options: {
     const current = options.scene();
     const state = ensureMaterials();
     const target = scope.value;
-    const context = state?.context(target, current) ?? { current, materials: [], modelLoaded: false };
-    const available = new Set(context.materials.map(material => material.id));
+    const context = state?.context(target, current) ?? { current, materials: [], parts: [], modelLoaded: false };
+    const available = new Set([...context.materials, ...context.parts].map(item => item.id));
+    const includePreview = vision.checked && !!model;
+    vision.checked = false;
     const currentSession = session;
     requesting = true;
     processing = '正在分析材质与修改要求…';
@@ -206,7 +234,7 @@ export function bindAssistant(options: {
     message('');
     update();
     try {
-      const answer = await askAssistant(conversation, context);
+      const answer = await askAssistant(conversation, context, includePreview ? options.previewImage() : undefined);
       if (currentSession !== session) return;
       if (answer.changes.length) {
         if (!state) throw new Error('请先导入模型，再应用材质或渲染修改。');
@@ -219,6 +247,7 @@ export function bindAssistant(options: {
           message('建议与当前参数一致，没有待应用的修改。');
         }
       }
+      if (!answer.changes.length && !pending) message('本轮没有可应用的修改。可以点选部件后再描述效果。');
       append('assistant', answer.reply);
       messages.push({ role: 'assistant', content: answer.reply });
       messages = messages.slice(-12);
@@ -251,7 +280,7 @@ export function bindAssistant(options: {
   function setModel(next: RenderModel) {
     model = next;
     edits = undefined;
-    scope.replaceChildren(new Option('全部模型材质', ''));
+    scope.replaceChildren(new Option('自动定位材质或部件', ''));
     ensureMaterials();
     clearConversation();
   }
@@ -261,6 +290,14 @@ export function bindAssistant(options: {
   void refreshSettings();
   return {
     refreshSettings, setModel,
+    cancelPicking: () => setPicking(false),
+    pickPart(mesh: Parameters<AssistantEdits['partAt']>[0], index: number) {
+      const part = edits?.partAt(mesh,index);
+      if (!part) { message('这里没有可编辑的表面，请重新点选。'); return; }
+      scope.value = part.id;
+      scope.dispatchEvent(new Event('change'));
+      message('已选中：' + part.name);
+    },
     overrides: () => edits?.overrides(),
     setLocked(value: boolean) { locked = value; update(); },
   };

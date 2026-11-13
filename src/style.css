@@ -102,6 +102,11 @@ button.import-button:hover:enabled{background:#dbe8ff}
 .stage-leading{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .assistant-toggle{background:#eaf1ff;border-color:#b4c8ed;color:#17479c;font-weight:700;white-space:nowrap}
 #assistant-compare{display:inline-flex;align-items:center;gap:4px;white-space:nowrap;touch-action:none;user-select:none}
+#render-undo{white-space:nowrap}
+#assistant-pick{font-size:12px;min-height:28px;padding:4px 8px;justify-self:start}
+#assistant-pick[aria-pressed=true]{background:#e7efff;color:#16469f;border-color:#9ebcf7}
+.paper .overlay[data-pick=true]{cursor:crosshair}
+.assistant-vision{font-size:11px;color:var(--muted);display:flex;align-items:center;gap:5px}
 .assistant-progress{display:flex;align-items:center;gap:7px;color:#204c9b;background:#eef4ff;padding:9px 12px;font-size:12px}
 .assistant-progress[hidden],.canvas-badge[hidden]{display:none}
 .assistant-spinner{display:inline-block;flex:none;width:13px;height:13px;vertical-align:middle;border:2px solid #a6bce7;border-top-color:#2459cd;border-radius:50%;animation:assistant-spin .8s linear infinite}
