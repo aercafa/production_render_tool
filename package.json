@@ -1,0 +1,28 @@
+{
+  "name": "render-tool-pm",
+  "version": "0.2.0",
+  "description": "本地模型出图工作台",
+  "main": "desktop/main.mjs",
+  "scripts": {
+    "test": "playwright test",
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "desktop": "npm run build && electron .",
+    "package:win": "npm run build && electron-builder --win nsis --x64"
+  },
+  "type": "module",
+  "dependencies": {
+    "rhino3dm": "8.35.0",
+    "three": "0.187.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.0",
+    "@types/three": "0.187.0",
+    "electron": "45.3.1",
+    "electron-builder": "26.18.0",
+    "typescript": "7.0.2",
+    "vite": "8.3.8"
+  },
+  "private": true
+}

@@ -1,0 +1,11 @@
+node_modules/
+dist/
+release/
+test-results/
+playwright-report/
+local-fixtures/
+*.local
+.env
+.env.*
+settings.json
+*.3dm

@@ -1,0 +1,62 @@
+{
+  "oak": {
+    "label": "浅橡木 · 哑光",
+    "surface": "wood",
+    "defaults": { "color": "#b9956d", "roughness": 0.82, "metalness": 0, "grainScale": 1, "grainDetail": 0.55, "grainDirection": "auto" },
+    "tune": ["color", "roughness", "grainScale", "grainDetail", "grainDirection"]
+  },
+  "walnut": {
+    "label": "深胡桃木 · 哑光",
+    "surface": "wood",
+    "defaults": { "color": "#805638", "roughness": 0.85, "metalness": 0, "grainScale": 1, "grainDetail": 0.55, "grainDirection": "auto" },
+    "tune": ["color", "roughness", "grainScale", "grainDetail", "grainDirection"]
+  },
+  "metal_matte": {
+    "label": "金属 · 亚光",
+    "surface": "metal",
+    "defaults": { "color": "#aab2b7", "roughness": 0.48, "metalness": 1, "specularIntensity": 1 },
+    "tune": ["color", "roughness", "metalness"]
+  },
+  "metal_polished": {
+    "label": "金属 · 亮光",
+    "surface": "metal",
+    "defaults": { "color": "#d2d5d8", "roughness": 0.16, "metalness": 1, "specularIntensity": 1 },
+    "tune": ["color", "roughness", "metalness"]
+  },
+  "plastic": {
+    "label": "塑料 · 微哑光",
+    "surface": "opaque",
+    "defaults": { "color": "#555c65", "roughness": 0.44, "metalness": 0, "specularIntensity": 0.75, "clearcoat": 0.12 },
+    "tune": ["color", "roughness", "specularIntensity", "clearcoat"]
+  },
+  "rubber": {
+    "label": "橡胶 · 哑光",
+    "surface": "opaque",
+    "defaults": { "color": "#303231", "roughness": 0.88, "metalness": 0, "specularIntensity": 0.3 },
+    "tune": ["color", "roughness", "specularIntensity"]
+  },
+  "engineered_stone": {
+    "label": "人造石 · 细颗粒",
+    "surface": "stone",
+    "defaults": { "color": "#c4beb0", "roughness": 0.65, "metalness": 0, "specularIntensity": 0.6, "grainScale": 1, "grainDetail": 0.65 },
+    "tune": ["color", "roughness", "grainScale", "grainDetail", "specularIntensity"]
+  },
+  "glass": {
+    "label": "玻璃 · 透明",
+    "surface": "glass",
+    "defaults": { "color": "#f1faf8", "roughness": 0.12, "metalness": 0, "specularIntensity": 1, "transmission": 1, "ior": 1.5 },
+    "tune": ["color", "roughness", "transmission", "ior", "specularIntensity"]
+  },
+  "screen": {
+    "label": "屏幕 · 黑玻璃",
+    "surface": "screen",
+    "defaults": { "color": "#161e28", "roughness": 0.25, "metalness": 0, "specularIntensity": 0.85, "clearcoat": 0.45, "emissiveColor": "#ffffff", "emissiveIntensity": 0 },
+    "tune": ["color", "roughness", "clearcoat", "emissiveColor", "emissiveIntensity"]
+  },
+  "emissive": {
+    "label": "自发光 · 柔光",
+    "surface": "emissive",
+    "defaults": { "color": "#7496ac", "roughness": 0.5, "metalness": 0, "specularIntensity": 0.6, "emissiveColor": "#8edfff", "emissiveIntensity": 0.8 },
+    "tune": ["color", "roughness", "emissiveColor", "emissiveIntensity"]
+  }
+}

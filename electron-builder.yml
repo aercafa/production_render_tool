@@ -1,0 +1,25 @@
+appId: com.renderworkbench.desktop
+productName: 模型出图工作台
+directories:
+  output: release
+files:
+  - dist/**/*
+  - desktop/**/*
+  - server/local-workbench.mjs
+  - server/assistant.mjs
+  - server/material-rules.mjs
+  - server/material-presets.json
+extraResources:
+  - from: server/rhino-mesh.py
+    to: rhino-mesh.py
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  artifactName: RenderWorkbench-Setup-${version}-${arch}.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  installerLanguages: [zh_CN, en_US]
+  shortcutName: 模型出图工作台
