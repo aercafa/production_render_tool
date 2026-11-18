@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { createReadStream, existsSync, realpathSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync, realpathSync } from 'node:fs';
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,7 +9,11 @@ import { createWorkbenchService } from './local-workbench.mjs';
 const host = '127.0.0.1';
 const ports = Array.from({ length: 11 }, (_, i) => 5173 + i);
 const dist = realpathSync(fileURLToPath(new URL('../dist/', import.meta.url)));
-const instance = createHash('sha256').update(dist).digest('hex');
+const fingerprint = createHash('sha256').update(dist)
+  .update(readFileSync(path.join(dist,'index.html')))
+  .update(readFileSync(new URL('./local-workbench.mjs',import.meta.url)));
+if(existsSync(path.join(dist,'source-build.json')))fingerprint.update(readFileSync(path.join(dist,'source-build.json')));
+const instance=fingerprint.digest('hex');
 const apiPrefix = '/api/workbench';
 const types = new Map([
   ['.html', 'text/html; charset=utf-8'],

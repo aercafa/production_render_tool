@@ -35,16 +35,18 @@ export type MaterialValues = {
   grainDetail: number;
 };
 export type MaterialOverrides = ReadonlyMap<THREE.Mesh, ReadonlyMap<number, Partial<MaterialValues>>>;
-export type RenderTuning = { ao: number; shadow: number; reflection: number };
+export type RenderTuning = { ao: number; shadow: number; reflection: number; lightZ: number; lightY: number };
 export const defaultTuning: RenderTuning = {
   ao: premiumStudio.ao.strength,
   shadow: premiumStudio.shadow.intensity,
   reflection: premiumStudio.environmentIntensity,
+  lightZ: 0, lightY: 0,
 };
 export type SceneValues = RenderTuning & { style: RenderStyle; exposure: number };
 type MaterialProperty = keyof MaterialValues;
 type SceneProperty = keyof SceneValues;
 type OverridesById = Map<string, Partial<MaterialValues>>;
+export type MaterialSnapshot = [string, Partial<MaterialValues>][];
 export type Change = { target: string; property: MaterialProperty | SceneProperty; value: string | number };
 type ModelMaterial = {
   id: string;
@@ -65,6 +67,7 @@ export const propertyLabels = {
   emissiveColor: '自发光颜色', specularIntensity: '高光强度', clearcoat: '清漆强度',
   transmission: '透射率', ior: '折射率',
   style: '渲染风格', exposure: '曝光', ao: 'AO 强度', shadow: '阴影强度', reflection: '环境反射',
+  lightZ: '光箱 Z 轴角度', lightY: '光箱 Y 轴角度',
 };
 export const styleLabels = { studio: '棚拍材质', premium: '高保真棚拍', clay: '灰白模 · 线描' };
 
@@ -221,6 +224,7 @@ export class AssistantEdits {
         if (property === 'exposure') valid = typeof value === 'number' && Number.isInteger(value) && value >= -10 && value <= 10;
         if (property === 'ao' || property === 'shadow') valid = numberIn(value, 1);
         if (property === 'reflection') valid = numberIn(value, 2);
+        if (property === 'lightZ' || property === 'lightY') valid = typeof value === 'number' && Number.isFinite(value) && value >= -180 && value <= 180;
       } else if (part && available.has(target) && (!scope || scope === target || part.part?.material === scope)) {
         if (property === 'color' || property === 'emissiveColor') valid = typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value);
         if (property === 'roughness' || property === 'metalness') valid = numberIn(value, 1);
@@ -341,6 +345,21 @@ export class AssistantEdits {
     return entry ? { scene: entry.scene, overrides: this.overrides(entry.values) } : undefined;
   }
 
+  snapshot(): MaterialSnapshot { return structuredClone([...this.values]); }
+
+  restore(snapshot: MaterialSnapshot, current: SceneValues, next: SceneValues) {
+    const values: OverridesById = new Map();
+    for (const [id, entry] of snapshot) {
+      if (!this.target(id) || !entry || typeof entry !== 'object' || Array.isArray(entry) || Object.keys(entry).some(key => !validStoredMaterial(key, entry[key as MaterialProperty]))) {
+        throw new Error('记录中的材质与当前模型不匹配。');
+      }
+      values.set(id, structuredClone(entry));
+    }
+    this.history.push({ values: this.values, scene: { ...current }, after: { ...next } });
+    this.values = values;
+    return { ...next };
+  }
+
   overrides(source = this.values): MaterialOverrides {
     const result = new Map<THREE.Mesh, Map<number, Partial<MaterialValues>>>();
     for (const target of [...this.materials.values(), ...this.parts.values()]) {
@@ -358,4 +377,15 @@ export class AssistantEdits {
 
 function numberIn(value: unknown, max: number) {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= max;
+}
+
+function validStoredMaterial(property: string, value: unknown) {
+  if (property === 'color' || property === 'emissiveColor') return typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value);
+  if (['roughness','metalness','specularIntensity','clearcoat','transmission','grainDetail'].includes(property)) return numberIn(value,1);
+  if (property === 'emissiveIntensity') return numberIn(value,2);
+  if (property === 'ior') return typeof value === 'number' && Number.isFinite(value) && value >= 1 && value <= 2.33;
+  if (property === 'grainScale') return typeof value === 'number' && Number.isFinite(value) && value >= .4 && value <= 2.5;
+  if (property === 'pattern') return typeof value === 'string' && (value === 'source' || Object.hasOwn(materialPresets,value));
+  if (property === 'grainDirection') return typeof value === 'string' && Object.hasOwn(grainDirections,value);
+  return false;
 }

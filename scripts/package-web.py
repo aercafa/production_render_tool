@@ -1,6 +1,7 @@
 """Build portable ZIPs from the current dist and pinned official Node.js archives."""
 import argparse
 import hashlib
+import json
 from pathlib import Path
 import stat
 import tarfile
@@ -24,11 +25,12 @@ RUNTIMES = {
     ),
 }
 ROOT = Path(__file__).resolve().parents[1]
+VERSION = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["version"]
 OUTPUT = ROOT / "release" / "web"
 CACHE = OUTPUT / "node-downloads"
 SERVER = (
     "start-web.mjs", "local-workbench.mjs", "assistant.mjs", "material-presets.json",
-    "material-rules.mjs", "rhino-mesh.py", "pick-folder.ps1",
+    "material-rules.mjs", "rhino-mesh.py", "pick-folder.ps1", "model-imports.mjs", "pick-models.ps1",
 )
 
 
@@ -75,6 +77,11 @@ def package(platform):
             write_entry(archive, f"runtime/{Path(executable).name}", node, True)
             write_entry(archive, "runtime/NODE-LICENSE.txt", license_text)
             write_entry(archive, "打开说明.txt", (ROOT / "QUICK-START.txt").read_bytes())
+            write_entry(archive, "VERSION.txt", (VERSION + "\n").encode())
+            write_entry(archive, "build-info.json", json.dumps({
+                "version": VERSION, "platform": platform, "node": NODE_VERSION,
+                "engine": "threejs", "indexSha256": archive_hash(ROOT / "dist" / "index.html"),
+            }, indent=2).encode())
             for name in SERVER:
                 write_entry(archive, f"server/{name}", (ROOT / "server" / name).read_bytes())
             for file in sorted((ROOT / "dist").rglob("*")):

@@ -116,9 +116,10 @@ export function styleRenderMesh(mesh: THREE.Mesh) {
     const name = material.name + ' ' + mesh.name;
     const glassName = /玻璃|黑玻|黑色丝印|\bglass\b|glazing|cover[ _-]?glass/i;
     const matte = /哑光|漫反射|matte|anti[ _-]?glare|\bLED\b/i.test(name);
+    const explicitOpaque = /亚克力|acrylic|塑料|橡胶|弹性体|金属|石墨|绝缘|声孔|plastic|rubber|metal/i.test(name);
     const screen = /显示屏|触摸屏|屏幕|可视区域|\bscreen\b|\bdisplay\b/i.test(name);
     const dark = !base.map && !base.vertexColors && Math.max(base.color.r, base.color.g, base.color.b) < .055;
-    if (!matte && (glassName.test(name) || screen || dark)) {
+    if (!base.userData.rhinoPbr && !matte && (!explicitOpaque || screen || glassName.test(name)) && (glassName.test(name) || screen || dark)) {
       const panel = panelGeometry(mesh.geometry, Array.isArray(mesh.material) ? index : null);
       if (!panel.box.isEmpty() && (glassName.test(material.name) || isThinPanel(panel))) {
         return glassMaterial(base, panel.box);
@@ -131,12 +132,17 @@ export function styleRenderMesh(mesh: THREE.Mesh) {
 
 export function premiumSurface(source: THREE.Material, objectName: string) {
   if (source.userData.rhinoPbr) return 'source';
-  if (source.userData.screenGlass) return 'glass';
   const label = (source.name + ' ' + objectName).replaceAll('_', ' ');
+  if (/亚克力|acrylic/i.test(label)) return 'acrylic';
+  if (source.userData.screenGlass) return 'glass';
   if (/喷涂|烤漆|粉末涂层|powder|paint|coating|lacquer/i.test(label)) return 'coating';
   if (/拉丝|brushed/i.test(label)) return 'brushed';
-  if (/亚光金属|哑光金属|matte[ -]+metal/i.test(label)) return 'matte-metal';
+  if (/(?:亚光|哑光|磨砂).*金属|matte[ -]+metal/i.test(label)) return 'matte-metal';
+  if (/缎面.*金属|金属.*缎面|satin.*metal|metal.*satin/i.test(label)) return 'satin-metal';
+  if (/抛光.*金属|亮光.*金属|polished.*metal/i.test(label)) return 'polished-metal';
   if (/金属|裸铝|铝合金|不锈钢|青铜|黄铜|镀铬|\b(?:aluminium|aluminum|steel|chrome|bronze|brass|copper|metal)\b/i.test(label)) return 'metal';
+  if (/橡胶|弹性体|rubber|elastomer/i.test(label)) return 'rubber';
+  if (/塑料|石墨灰|触感面|声孔内衬|绝缘体|内座|plastic|\bABS\b|\bPC\b/i.test(label)) return 'plastic';
   return 'source';
 }
 
@@ -158,18 +164,23 @@ export function premiumMaterial(source: THREE.Material, finish: ReturnType<typeo
     aoMap: source.aoMap, aoMapIntensity: source.aoMapIntensity,
   });
   const legacyShine = source.userData.legacyShine;
-  if (typeof legacyShine === 'number' && legacyShine > 0 && !m.roughnessMap) {
+  if (!source.userData.rhinoPbr && typeof legacyShine === 'number' && legacyShine > 0 && !m.roughnessMap) {
     m.roughness = THREE.MathUtils.clamp(Math.sqrt(2 / (legacyShine + 2)), .28, .75);
   }
-  if (finish === 'glass') {
-    m.clearcoat = .58;
+  if (finish === 'glass' || finish === 'acrylic') {
+    m.metalness = 0;
+    m.ior = finish === 'acrylic' ? 1.49 : 1.5;
+    m.specularIntensity = .85;
+    m.clearcoat = finish === 'acrylic' ? .35 : .45;
     m.clearcoatRoughness = .24;
-    m.roughness = .24;
-  } else if ((finish === 'metal' || finish === 'brushed' || finish === 'matte-metal') && !m.metalnessMap && !m.transparent) {
+    if (!m.roughnessMap) m.roughness = finish === 'acrylic' ? .18 : .23;
+  } else if ((finish === 'metal' || finish === 'brushed' || finish === 'matte-metal' || finish === 'satin-metal' || finish === 'polished-metal') && !m.metalnessMap && !m.transparent) {
     const metal = premiumStudio.legacyMetal;
     m.metalness = Math.max(m.metalness, metal.metalness);
     if (!m.roughnessMap) {
-      if (finish === 'matte-metal') m.roughness = Math.max(m.roughness, .48);
+      if (finish === 'matte-metal') m.roughness = Math.max(m.roughness, .50);
+      else if (finish === 'satin-metal') m.roughness = .38;
+      else if (finish === 'polished-metal') m.roughness = .18;
       else {
         const maxRoughness = finish === 'brushed' ? metal.brushedMaxRoughness : metal.maxRoughness;
         m.roughness = THREE.MathUtils.clamp(m.roughness, metal.minRoughness, maxRoughness);
@@ -177,11 +188,42 @@ export function premiumMaterial(source: THREE.Material, finish: ReturnType<typeo
     }
     if (finish === 'brushed' && !m.anisotropyMap) m.anisotropy = Math.max(m.anisotropy, metal.anisotropy);
   } else if (finish === 'coating') {
+    m.metalness = 0;
+    if (!m.roughnessMap) m.roughness = Math.max(m.roughness,.48);
     m.clearcoat = Math.max(m.clearcoat,.23);
     m.clearcoatRoughness = .37;
+  } else if (finish === 'rubber' || finish === 'plastic') {
+    m.metalness = 0;
+    if (!m.roughnessMap) m.roughness = finish === 'rubber' ? .85 : .48;
+    m.clearcoat = 0;
+    m.specularIntensity = finish === 'rubber' ? .3 : .65;
   }
   // clone()/conversion does not copy custom material shaders.
-  m.onBeforeCompile = source.onBeforeCompile;
-  m.customProgramCacheKey = source.customProgramCacheKey;
+  m.userData = { ...source.userData };
+  if (finish !== 'glass' && finish !== 'acrylic') {
+    m.onBeforeCompile = source.onBeforeCompile;
+    m.customProgramCacheKey = source.customProgramCacheKey;
+  }
+  if (!source.userData.rhinoPbr && (/metal|plastic|rubber|coating/.test(finish) || finish === 'brushed') && !m.roughnessMap) applyMicroFinish(m);
   return m;
+}
+
+/** Tiny filtered roughness variation, without changing model geometry or base colour. */
+export function applyMicroFinish(material: THREE.MeshStandardMaterial) {
+  const compile = material.onBeforeCompile;
+  const key = material.customProgramCacheKey();
+  material.onBeforeCompile = function(shader,renderer) {
+    compile.call(this,shader,renderer);
+    shader.vertexShader = shader.vertexShader.replace('#include <common>','#include <common>\nvarying vec3 vFinishPosition;')
+      .replace('#include <begin_vertex>','#include <begin_vertex>\nvFinishPosition = position;');
+    shader.fragmentShader = shader.fragmentShader.replace('#include <common>','#include <common>\nvarying vec3 vFinishPosition;')
+      .replace('#include <roughnessmap_fragment>',`#include <roughnessmap_fragment>
+        vec3 finishP = vFinishPosition * 4.0;
+        vec3 finishFootprint = fwidth(finishP);
+        float finishFade = 1.0 - smoothstep(.3,1.1,max(finishFootprint.x,max(finishFootprint.y,finishFootprint.z)));
+        float finishGrain = sin(dot(finishP,vec3(1.73,3.11,2.37))) * sin(dot(finishP,vec3(4.13,1.37,2.71)));
+        roughnessFactor = clamp(roughnessFactor + .022 * finishGrain * finishFade,.06,1.0);
+      `);
+  };
+  material.customProgramCacheKey = () => key + ':micro-finish-v1';
 }

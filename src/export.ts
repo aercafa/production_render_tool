@@ -2,6 +2,19 @@
 export const TILE_BORDER = 3;
 export const EXPORT_SAMPLES = 2;
 
+export function modelCaption(name: string) {
+  return name.replace(/^.*[\\/]/,'').replace(/\.(?:obj|3dm)$/i,'').trim();
+}
+
+/** Use the last edited title/caption consistently for downloads and native saves. */
+export function pngFileName(title: string, subtitle: string, modelName: string) {
+  const candidate=title.trim()||subtitle.trim()||modelCaption(modelName)||'模型出图';
+  let stem=candidate.replace(/\.png$/i,'').replace(/[<>:"/\\|?*\u0000-\u001f]/g,'_').slice(0,90).replace(/[. ]+$/g,'');
+  if(!stem)stem='模型出图';
+  if(/^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i.test(stem))stem='_'+stem;
+  return stem+'.png';
+}
+
 const sinc = (x: number) => Math.sin(Math.PI * x) / (Math.PI * x);
 const taps = Array.from({ length: 6 }, (_, i) => sinc((i + .5) / 2) * sinc((i + .5) / 6));
 const normalization = 2 * taps.reduce((sum, x) => sum + x, 0);

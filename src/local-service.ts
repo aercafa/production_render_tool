@@ -8,6 +8,7 @@ export type LocalSettings = {
   hours: number;
   rhinoAvailable: boolean;
   nativeSave: boolean;
+  nativeImport: boolean;
   assistant: { url: string; model: string; hasKey: boolean };
 };
 
@@ -26,7 +27,7 @@ async function request(route: string, options: RequestInit = {}) {
 
 export type OperationProgress = (message: string, percent?: number, detail?: string) => void;
 
-export async function prepareMesh(body: ArrayBuffer, onProgress?: OperationProgress) {
+export async function prepareMesh(body: Blob, onProgress?: OperationProgress) {
   const id = crypto.randomUUID();
   const tracking = new AbortController();
   let timer: number | undefined;
@@ -36,6 +37,7 @@ export async function prepareMesh(body: ArrayBuffer, onProgress?: OperationProgr
       const state = await response.json() as { stage?: string; completed?: number; total?: number; position?: number };
       if (tracking.signal.aborted) return;
       if (state.stage === 'queued') onProgress?.('等待前面的网格或缓存任务完成…', undefined, '排队第 ' + state.position + ' 位');
+      if (state.stage === 'receiving') onProgress?.('正在写入本机临时文件…');
       if (state.stage === 'rhino') onProgress?.('正在启动 Rhino 网格处理…');
       if (state.stage === 'meshing' && state.total && state.completed !== undefined) {
         const percent = Math.round(state.completed / state.total * 100);
@@ -52,7 +54,7 @@ export async function prepareMesh(body: ArrayBuffer, onProgress?: OperationProgr
     });
     tracking.abort();
     onProgress?.('正在读取处理后的网格…');
-    return { buffer: await response.arrayBuffer(), cached: response.headers.get('X-Render-Cache') === 'hit' };
+    return { file: await response.blob(), cached: response.headers.get('X-Render-Cache') === 'hit' };
   } finally {
     tracking.abort();
     window.clearTimeout(timer);
@@ -61,6 +63,24 @@ export async function prepareMesh(body: ArrayBuffer, onProgress?: OperationProgr
 
 export async function readSettings(): Promise<LocalSettings> {
   return (await request('settings')).json();
+}
+
+export type ImportSourceFile = { name: string; path?: string; size: number; modified: number };
+type NativeModelFile = ImportSourceFile & { token: string };
+type NativeModelSelection = { id: string; files: NativeModelFile[]; cancelled?: false } | { cancelled: true };
+export type ImportSource = { kind: 'native'|'browser'|'drop'|'legacy'; files: ImportSourceFile[]; nativeId?: string };
+
+export async function nativeModelFiles(id?: string): Promise<{files: File[]; source: ImportSource}|null> {
+  const result=await (await request(id?'models/reopen':'models/pick',{
+    method:'POST',...(id?{body:JSON.stringify({id}),headers:{'Content-Type':'application/json'}}:{}),
+  })).json() as NativeModelSelection;
+  if(result.cancelled)return null;
+  const files=[];
+  for(const item of result.files){
+    const blob=await(await request('models/file?token='+encodeURIComponent(item.token))).blob();
+    files.push(new File([blob],item.name,{lastModified:item.modified}));
+  }
+  return {files,source:{kind:'native',nativeId:result.id,files:result.files.map(({token,...entry})=>entry)}};
 }
 
 export async function writeSettings(cacheLocation: string, exportLocation: string, assistant?: AssistantSettings) {

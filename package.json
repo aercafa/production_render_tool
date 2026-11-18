@@ -1,12 +1,12 @@
 {
   "name": "render-tool-pm",
-  "version": "0.2.0",
+  "version": "0.3.2",
   "description": "本地模型出图工作台",
   "main": "desktop/main.mjs",
   "scripts": {
     "test": "playwright test",
     "dev": "vite --host 127.0.0.1",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && vite build && node scripts/source-build.mjs stamp",
     "preview": "vite preview --host 127.0.0.1",
     "desktop": "npm run build && electron .",
     "package:win": "npm run build && electron-builder --win nsis --x64"

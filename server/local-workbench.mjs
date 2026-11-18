@@ -1,14 +1,19 @@
 import * as fs from 'node:fs/promises';
-import { createReadStream, existsSync } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { assistantConfig, assistantEndpoint, chatAssistant, testAssistant } from './assistant.mjs';
+import { createModelImports } from './model-imports.mjs';
 
 const TTL = 24 * 60 * 60 * 1000;
 const LIMIT = 256 * 1024 * 1024;
+const MESH_INPUT_LIMIT = 1024 * 1024 * 1024;
+const MESH_OUTPUT_LIMIT = 512 * 1024 * 1024;
 const CACHE_NAME = 'RenderWorkbench-MeshCache';
 const CACHE_OWNER = '.render-workbench-cache';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -161,20 +166,52 @@ function child(exe, args, options) {
   });
 }
 
-async function convertMesh(source, location, exe, jobStarted) {
-  const dir = await cacheFolder(location,true);
-  const hash = createHash('sha256').update(await fs.readFile(WORKER)).update(source).digest('hex');
-  const output = path.join(dir,hash+'.3dm');
-  const entry = await fs.lstat(output).catch(() => null);
-  if (entry?.isFile() && Date.now()-entry.mtimeMs < TTL) return { output, cached:true };
-  if (entry) {
-    if (!entry.isFile()) throw failure('缓存中存在同名的非普通文件。');
-    await fs.unlink(output);
+async function saveMeshInput(req, sourcePath, hash) {
+  let bytes = 0;
+  let header = Buffer.alloc(0);
+  const validate = new Transform({
+    transform(chunk, _encoding, done) {
+      bytes += chunk.length;
+      if (bytes > MESH_INPUT_LIMIT) { done(failure('3DM 原文件超过 1 GiB。',413)); return; }
+      if (header.length < 24) {
+        header = Buffer.concat([header,chunk.subarray(0,24-header.length)]);
+        if (header.length === 24 && header.toString('ascii') !== '3D Geometry File Format ') {
+          done(failure('文件不是有效的 3DM。',422)); return;
+        }
+      }
+      hash.update(chunk);
+      done(null,chunk);
+    },
+    flush(done) { done(header.length < 24 ? failure('文件不是有效的 3DM。',422) : undefined); },
+  });
+  // Keep IncomingMessage out of pipeline so an invalid upload can receive a JSON error.
+  const abort = () => validate.destroy(failure('3DM 上传已中断。',400));
+  req.once('aborted',abort);
+  try {
+    const writing = pipeline(validate,createWriteStream(sourcePath,{flags:'wx'}));
+    req.pipe(validate);
+    await writing;
+  } finally {
+    req.off('aborted',abort);
+    req.unpipe(validate);
+    req.resume();
   }
+}
+
+async function convertMesh(req, location, exe, jobStarted) {
+  const dir = await cacheFolder(location,true);
   const job = path.join(dir,'job-'+randomUUID());
   await fs.mkdir(job);
   try {
-    await fs.writeFile(path.join(job,'source.3dm'),source,{flag:'wx'});
+    const hash = createHash('sha256').update(await fs.readFile(WORKER));
+    await saveMeshInput(req,path.join(job,'source.3dm'),hash);
+    const output = path.join(dir,hash.digest('hex')+'.3dm');
+    const entry = await fs.lstat(output).catch(() => null);
+    if (entry?.isFile() && Date.now()-entry.mtimeMs < TTL) return { output, cached:true };
+    if (entry) {
+      if (!entry.isFile()) throw failure('缓存中存在同名的非普通文件。');
+      await fs.unlink(output);
+    }
     jobStarted(job);
     const scriptArg = /\s/.test(WORKER) ? '""'+WORKER+'""' : WORKER;
     await child(exe,['/new','/nosplash','/notemplate','/runscript="_-RunPythonScript '+scriptArg+' _-Exit _No"'],{
@@ -190,7 +227,7 @@ async function convertMesh(source, location, exe, jobStarted) {
     if (!report.parts || !report.triangles) throw failure('Rhino 没有生成可用网格。',422);
     const file = path.join(job,'mesh.3dm');
     const fileStats = await fs.stat(file);
-    if (!fileStats.isFile() || fileStats.size > LIMIT) throw failure('网格缓存文件过大。',413);
+    if (!fileStats.isFile() || fileStats.size > MESH_OUTPUT_LIMIT) throw failure('可见网格转换结果超过 512 MiB。',413);
     await fs.rename(file,output);
     return { output, cached:false };
   } finally { await discardJob(job); }
@@ -228,8 +265,16 @@ async function jsonBody(req, limit) {
   catch { throw failure('请求不是有效的 JSON。'); }
 }
 
-export function createWorkbenchService({ authorize = localRequest, selectFolder, selectExport } = {}) {
+export function createWorkbenchService({ authorize = localRequest, selectFolder, selectExport, selectModelFiles } = {}) {
   let exclusive = false, picking = false;
+  const nativeImport=!!selectModelFiles||(process.platform==='win32'&&process.env.RENDER_WORKBENCH_DOCKER!=='1');
+  const modelImports=createModelImports(stateHome,async()=>{
+    if(selectModelFiles)return selectModelFiles();
+    const powershell=path.join(process.env.SystemRoot||'C:\\Windows','System32','WindowsPowerShell','v1.0','powershell.exe');
+    const result=await child(powershell,['-NoProfile','-NonInteractive','-STA','-ExecutionPolicy','Bypass','-File',path.join(HERE,'pick-models.ps1')],{timeout:120000,windowsHide:true});
+    if(result.code!==0)throw failure('无法打开本机模型选择器。',422);
+    try{return JSON.parse(result.stdout.replace(/^\uFEFF/,''));}catch{throw failure('无法读取本机文件选择结果。',422);}
+  });
   let activeMesh;
   const meshQueue = [];
   function releaseExclusive() {
@@ -260,12 +305,26 @@ export function createWorkbenchService({ authorize = localRequest, selectFolder,
       const route = req.method+' '+url.pathname;
       try {
         const requestId = url.searchParams.get('id');
+        if(route==='POST /models/pick'){
+          if(!nativeImport)throw failure('当前运行环境使用浏览器文件选择器。',501);
+          if(picking)throw failure('文件选择窗口已打开。',409);
+          picking=true;
+          try{json(res,200,await modelImports.pick());}finally{picking=false;}
+          return;
+        }
+        if(route==='POST /models/reopen'){
+          const input=await jsonBody(req,1024);
+          json(res,200,await modelImports.reopen(input?.id));return;
+        }
+        if(route==='GET /models/file'){
+          await modelImports.stream(url.searchParams.get('token'),res);return;
+        }
         if (route === 'GET /mesh/progress') {
           const job = activeMesh?.id === requestId ? activeMesh.job : null;
           const state = job ? await fs.readFile(path.join(job,'progress.json'),'utf8').then(JSON.parse).catch(() => null) : null;
           const position = meshQueue.findIndex(item => item.id === requestId);
           json(res,200,state ?? (position >= 0 ? {stage:'queued', position:position+1} :
-            activeMesh?.id === requestId ? {stage:'rhino'} : {}));
+            activeMesh?.id === requestId ? {stage:job ? 'rhino' : 'receiving'} : {}));
           return;
         }
         const settings = await getSettings();
@@ -273,7 +332,7 @@ export function createWorkbenchService({ authorize = localRequest, selectFolder,
           const stats = exclusive ? null : await oneAtATime(() => sweep(settings.cacheLocation)).catch(() => null);
           json(res,200,{cacheLocation:settings.cacheLocation, cacheFolder:path.join(settings.cacheLocation,CACHE_NAME),
             exportLocation:settings.exportLocation, cache:stats, hours:24, rhinoAvailable:!!rhinoExe(),
-            nativeSave:!!selectExport, assistant:{
+            nativeSave:!!selectExport, nativeImport, assistant:{
               url:settings.assistant?.url ?? '', model:settings.assistant?.model ?? '',
               hasKey:!!settings.assistant?.key,
             }});
@@ -335,7 +394,10 @@ export function createWorkbenchService({ authorize = localRequest, selectFolder,
           if (!exe) throw failure('本机未找到 Rhino 8，无法自动生成曲面网格。可导入已带网格的 3DM 或 OBJ。',503);
           if (req.headers['content-type'] !== 'application/octet-stream') throw failure('无效的 3DM 请求。',415);
           if (meshQueue.length >= 3) throw failure('网格处理队列已满，请等待当前任务完成。',429);
-          const inputPromise = body(req,LIMIT).then(input => ({input}), error => ({error}));
+          if (Number(req.headers['content-length'] || 0) > MESH_INPUT_LIMIT) {
+            req.resume();
+            throw failure('3DM 原文件超过 1 GiB。',413);
+          }
           if (exclusive) {
             const granted = await new Promise(resolve => {
               const item = {id:requestId, start:() => { res.off('close', cancel); resolve(true); }};
@@ -352,15 +414,12 @@ export function createWorkbenchService({ authorize = localRequest, selectFolder,
             exclusive = false;
           }
           await oneAtATime(async () => {
-            const {input,error} = await inputPromise;
-            if (error) throw error;
-            if (input.subarray(0,24).toString('ascii') !== '3D Geometry File Format ') throw failure('文件不是有效的 3DM。',422);
             const {cacheLocation} = await getSettings();
             await sweep(cacheLocation);
             activeMesh = {id:requestId,job:null};
             let converted;
             try {
-              converted = await convertMesh(input,cacheLocation,exe,job => { activeMesh.job = job; });
+              converted = await convertMesh(req,cacheLocation,exe,job => { activeMesh.job = job; });
             } finally { activeMesh = undefined; }
             const {output,cached} = converted;
             const {size} = await fs.stat(output);

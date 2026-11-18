@@ -270,7 +270,8 @@ export class SheetRenderer {
   private scene = new THREE.Scene();
   private effects: ViewEffects;
   private lights: { ambient: THREE.HemisphereLight; key: THREE.DirectionalLight; fill: THREE.DirectionalLight; rim: THREE.DirectionalLight;
-    softbox: THREE.RectAreaLight; sidebox: THREE.RectAreaLight };
+    softbox: THREE.RectAreaLight; sidebox: THREE.RectAreaLight; edgebox: THREE.RectAreaLight };
+  private lightRig = new THREE.Group();
   private lightStyle: RenderStyle = 'studio';
   private previewBuffer = document.createElement('canvas');
   private model: RenderModel | null = null;
@@ -282,7 +283,9 @@ export class SheetRenderer {
     this.renderer.toneMappingExposure = 1.0;
     this.scene.background = new THREE.Color(paper);
     const ambient = new THREE.HemisphereLight(0xffffff, 0xabb1bb, 1.5);
+    ambient.position.set(0,0,1);
     this.scene.add(ambient);
+    this.scene.add(this.lightRig);
     const key = new THREE.DirectionalLight(0xfffaf3, 2.1);
     key.position.set(-3, -4, 6);
     key.castShadow = true;
@@ -293,22 +296,25 @@ export class SheetRenderer {
     key.shadow.bias = -.0006;
     key.shadow.radius = premiumStudio.shadow.radius;
     key.shadow.intensity = premiumStudio.shadow.intensity;
-    this.scene.add(key);
+    this.lightRig.add(key);
     const fill = new THREE.DirectionalLight(0xe0e8fa, .95);
     fill.position.set(3, 2, 2);
-    this.scene.add(fill);
+    this.lightRig.add(fill);
     const rim = new THREE.DirectionalLight(0xffffff,0);
     rim.position.set(1.4,3.2,4.0);
-    this.scene.add(rim);
+    this.lightRig.add(rim);
     RectAreaLightUniformsLib.init();
     const softbox = new THREE.RectAreaLight(0xfffcf8, 0, premiumStudio.softbox.width, premiumStudio.softbox.height);
-    softbox.position.set(-.63,-1.10,.91);
+    softbox.position.set(-.75,-1.35,1.2);
     softbox.lookAt(0,0,.08);
     const sidebox = new THREE.RectAreaLight(0xf3f6ff, 0, premiumStudio.sidebox.width, premiumStudio.sidebox.height);
-    sidebox.position.set(1.06,-.13,.47);
+    sidebox.position.set(-.65,-1.25,-.35);
     sidebox.lookAt(0,0,.01);
-    this.scene.add(softbox,sidebox);
-    this.lights = { ambient, key, fill, rim, softbox, sidebox };
+    const edgebox = new THREE.RectAreaLight(0xffffff,0,premiumStudio.edgebox.width,premiumStudio.edgebox.height);
+    edgebox.position.set(.85,.85,.8);
+    edgebox.lookAt(0,0,.10);
+    this.lightRig.add(softbox,sidebox,edgebox);
+    this.lights = { ambient, key, fill, rim, softbox, sidebox, edgebox };
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.shadowMap.autoUpdate = false;
     this.effects = new ViewEffects(this.renderer, this.scene);
@@ -339,8 +345,8 @@ export class SheetRenderer {
     this.renderer.shadowMap.needsUpdate = true;
   }
 
-  setTuning(tuning: RenderTuning) {
-    this.tuning = tuning;
+  setTuning(tuning: Partial<RenderTuning>) {
+    this.tuning = { ...defaultTuning, ...tuning };
   }
 
   pickPart(point: Point, preset: number) {
@@ -379,13 +385,16 @@ export class SheetRenderer {
   private setLightStyle(style: RenderStyle) {
     if (style === this.lightStyle) return;
     const premium = style === 'premium';
-    const { ambient,key,fill,rim,softbox,sidebox } = this.lights;
+    const { ambient,key,fill,rim,softbox,sidebox,edgebox } = this.lights;
     ambient.intensity = premium ? premiumStudio.ambient : 1.5;
     key.intensity = premium ? premiumStudio.key : 2.1;
     fill.intensity = premium ? premiumStudio.fill : .95;
     rim.intensity = premium ? premiumStudio.rim : 0;
     softbox.intensity = premium ? premiumStudio.softbox.intensity : 0;
     sidebox.intensity = premium ? premiumStudio.sidebox.intensity : 0;
+    edgebox.intensity = premium ? premiumStudio.edgebox.intensity : 0;
+    if(premium)fill.position.set(.5,-2,.55);
+    else fill.position.set(3,2,2);
     this.effects.setEnvironment(this.renderer, this.scene, premium);
     this.renderer.toneMapping = premium ? THREE.NeutralToneMapping : THREE.ACESFilmicToneMapping;
     this.renderer.shadowMap.enabled = premium;
@@ -415,6 +424,11 @@ export class SheetRenderer {
     ctx.fillRect(0, 0, region.w, region.h);
     if (!this.model) return;
     this.setLightStyle(style);
+    const y = style === 'premium' ? THREE.MathUtils.degToRad(this.tuning.lightY) : 0;
+    const z = style === 'premium' ? THREE.MathUtils.degToRad(this.tuning.lightZ) : 0;
+    if (this.lightRig.rotation.y !== y || this.lightRig.rotation.z !== z) this.renderer.shadowMap.needsUpdate = true;
+    this.lightRig.rotation.set(0,y,z,'ZYX');
+    this.scene.environmentRotation.set(0,y,z,'ZYX');
     if (style === 'premium') {
       this.lights.key.shadow.intensity = this.tuning.shadow;
       this.scene.environmentIntensity = this.tuning.reflection;

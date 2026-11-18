@@ -8,12 +8,13 @@ function release(value: unknown) {
   (value as { delete?: () => void } | undefined)?.delete?.();
 }
 
-self.onmessage = async ({ data }: MessageEvent<ArrayBuffer>) => {
+self.onmessage = async ({ data }: MessageEvent<Blob>) => {
   try {
     const rhino = await rhinoPromise;
-    const doc = rhino.File3dm.fromByteArray(new Uint8Array(data));
+    const doc = rhino.File3dm.fromByteArray(new Uint8Array(await data.arrayBuffer()));
     if (!doc) throw new Error('无法读取 3DM 文件。请检查文件是否完整。');
     const issues: string[] = [];
+    const visibleIds = new Set<string>();
     const legacyMaterials: Record<string, number> = {};
     let unit = '';
     let unitFactor: number | null = null;
@@ -46,7 +47,57 @@ self.onmessage = async ({ data }: MessageEvent<ArrayBuffer>) => {
         const faces = mesh.faces();
         try { return faces.count > 0; } finally { release(faces); }
       }
+      const layers = new Map<number, { id: string; parent: string; visible: boolean }>();
+      const layerTable = doc.layers();
+      for (let i = 0; i < layerTable.count; i++) {
+        const layer = layerTable.get(i);
+        layers.set(layer.index, { id:layer.id, parent:layer.parentLayerId, visible:layer.visible });
+        release(layer);
+      }
+      const layersById = new Map(Array.from(layers.values(), layer => [layer.id, layer]));
+      function layerVisible(index: number) {
+        const visited = new Set<string>();
+        let layer = layers.get(index);
+        while (layer && !visited.has(layer.id)) {
+          if (!layer.visible) return false;
+          visited.add(layer.id);
+          layer = layersById.get(layer.parent);
+        }
+        return true;
+      }
+      const objects = new Map<string, { index: number; member: boolean; ref?: string }>();
       for (let i = 0; i < table.count; i++) {
+        const item = table.get(i);
+        const attr = item.attributes();
+        try {
+          const { activeSpace } = attr as typeof attr & { activeSpace: typeof rhino.ActiveSpace.PageSpace };
+          if (!attr.visible || attr.mode === rhino.ObjectMode.Hidden ||
+            activeSpace === rhino.ActiveSpace.PageSpace || !layerVisible(attr.layerIndex)) continue;
+          const geometry = item.geometry();
+          try {
+            objects.set(attr.id, { index:i, member:attr.isInstanceDefinitionObject,
+              ref:geometry instanceof rhino.InstanceReference ? geometry.parentIdefId : undefined });
+          } finally { release(geometry); }
+        } finally { release(attr); release(item); }
+      }
+      const definitions = new Map<string, string[]>();
+      const definitionTable = doc.instanceDefinitions();
+      for (let i = 0; i < definitionTable.count; i++) {
+        const definition = definitionTable.get(i);
+        definitions.set(definition.id, definition.getObjectIds() as string[]);
+        release(definition);
+      }
+      const pending = Array.from(objects, ([id, object]) => object.member ? null : id)
+        .filter((id): id is string => id !== null);
+      while (pending.length) {
+        const id = pending.pop()!;
+        const object = objects.get(id);
+        if (!object || visibleIds.has(id)) continue;
+        visibleIds.add(id);
+        if (object.ref) for (const member of definitions.get(object.ref) ?? []) pending.push(member);
+      }
+      for (const id of visibleIds) {
+        const i = objects.get(id)!.index;
         const item = table.get(i);
         const g = item.geometry();
         const attr = item.attributes();
@@ -84,7 +135,7 @@ self.onmessage = async ({ data }: MessageEvent<ArrayBuffer>) => {
       // The object table is owned by the document; its delete(id) removes an object.
       release(doc);
     }
-    self.postMessage({ issues, unit, unitFactor, legacyMaterials });
+    self.postMessage({ issues, unit, unitFactor, legacyMaterials, visibleIds:[...visibleIds] });
   } catch (e) {
     self.postMessage({ error: e instanceof Error ? e.message : String(e) });
   }

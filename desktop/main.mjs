@@ -28,6 +28,13 @@ async function start() {
   let origin;
   service = createWorkbenchService({
     authorize: req => req.headers['x-render-desktop'] === secret,
+    selectModelFiles: async () => {
+      const result=await dialog.showOpenDialog(window,{
+        title:'导入模型及材质文件',properties:['openFile','multiSelections'],
+        filters:[{name:'模型及资源',extensions:['obj','3dm','mtl','png','jpg','jpeg','webp','gif']}],
+      });
+      return result.canceled?[]:result.filePaths;
+    },
     selectFolder: async startPath => {
       const result = await dialog.showOpenDialog(window, {
         title: '选择文件夹',

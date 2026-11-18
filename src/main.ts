@@ -1,26 +1,28 @@
 import './style.css';
+import { version } from '../package.json';
 import { blankNotes, constrainLine, distanceToSegment, moveEndpoint, NoteHistory, type Axis, type Endpoint,
   type LabelSide, type LineMode, type Mark, type Notes, type Point } from './annotations';
 import type { Rect } from './mark-label';
 import { disposeModel, loadModel, measured, unitChoices, type RenderModel } from './model';
 import { drawEmpty, drawNotes, mainViews, SheetRenderer, SHEET_HEIGHT, SHEET_WIDTH } from './sheet';
-import { withPrintResolution } from './export';
-import { saveLocalExport } from './local-service';
+import { modelCaption, pngFileName, withPrintResolution } from './export';
+import { nativeModelFiles, readSettings, saveLocalExport, type ImportSource } from './local-service';
 import { bindSettings, settingsMarkup } from './settings';
 import type { RenderStyle } from './view-effects';
 import { exposureControl } from './render-config';
 import { assistantMarkup, bindAssistant } from './assistant-panel';
 import { defaultTuning, type AssistantEdits, type SceneValues } from './assistant-edits';
+import { bindRenderHistory, renderHistoryMarkup, renderModelKey, type RenderRecord } from './render-history';
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = [
   '<header class="topbar"><div class="brand"><span class="brand-logo" aria-hidden="true">',
   '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9"/></svg>',
-  '</span><div><h1>模型出图工作台</h1></div></div>',
+  '</span><div><h1>模型出图工作台 <small class="brand-version">v' + version + '</small></h1></div></div>',
   '<div class="top-actions"><button id="settings-button" class="quiet" aria-haspopup="dialog">设置</button><button id="open" class="import-button"><span aria-hidden="true">＋</span> 导入模型</button></div></header>',
   '<input id="file" type="file" accept=".obj,.3dm,.mtl,.png,.jpg,.jpeg,.webp,.gif" multiple hidden>',
-  '<main class="shell has-assistant">', assistantMarkup, '<section class="workspace" aria-label="成图预览"><div class="stage-head">',
-  '<div class="stage-leading"><button id="assistant-toggle" class="assistant-toggle" aria-controls="assistant-panel" aria-expanded="true">渲染助手</button>',
+  '<main class="shell has-assistant"><div id="left-rail" class="left-rail">', renderHistoryMarkup, assistantMarkup, '</div><section class="workspace" aria-label="成图预览"><div class="stage-head">',
+  '<div class="stage-leading"><button id="assistant-toggle" class="assistant-toggle" aria-controls="left-rail" aria-expanded="true">渲染助手</button>',
   '<label class="view-select style-select">渲染风格<select id="render-style" aria-label="渲染风格">',
   '<option value="studio">棚拍材质</option><option value="premium">高保真棚拍</option><option value="clay">灰白模 · 线描</option></select></label></div>',
   '<div class="stage-tools"><label class="view-select">主视角<select id="main-view" aria-label="主视角">',
@@ -64,7 +66,14 @@ app.innerHTML = [
   '<span id="exposure-value" aria-hidden="true">0</span><button id="reset-exposure" class="link" type="button" aria-label="重置曝光">重置</button></div>',
   '<input id="exposure" type="range" min="' + exposureControl.min + '" max="' + exposureControl.max +
     '" step="1" value="' + exposureControl.default + '">',
-  '<div class="exposure-ticks" aria-hidden="true"><span>−10</span><span>0</span><span>+10</span></div></div></section></div>',
+  '<div class="exposure-ticks" aria-hidden="true"><span>−10</span><span>0</span><span>+10</span></div></div>',
+  '<div id="premium-controls" class="light-controls" hidden><div class="row light-heading"><strong>高保真 · 光箱方向</strong><button id="reset-light" class="link" type="button">归零</button></div>',
+  '<label class="angle-control" for="light-z"><span>光箱 Z 轴角度 <small>水平转</small></span><span id="light-z-value" aria-hidden="true">0°</span></label>',
+  '<input id="light-z" aria-label="光箱 Z 轴角度" type="range" min="-180" max="180" step="1" value="0">',
+  '<div class="exposure-ticks" aria-hidden="true"><span>−180°</span><span>0°</span><span>180°</span></div>',
+  '<label class="angle-control" for="light-y"><span>光箱 Y 轴角度 <small>垂直转</small></span><span id="light-y-value" aria-hidden="true">0°</span></label>',
+  '<input id="light-y" aria-label="光箱 Y 轴角度" type="range" min="-180" max="180" step="1" value="0">',
+  '<div class="exposure-ticks" aria-hidden="true"><span>−180°</span><span>0°</span><span>180°</span></div></div></section></div>',
   '<footer class="panel-footer"><div class="download-row"><strong>成图导出</strong><span>6000 × 4000 px</span></div>',
   '<button id="export" class="primary export-button" disabled>导出 PNG</button></footer></aside></main>',
   settingsMarkup,
@@ -89,6 +98,9 @@ const styleChoice = el<HTMLSelectElement>('render-style');
 const exposureSlider = el<HTMLInputElement>('exposure');
 const exposureOutput = el('exposure-value');
 const resetExposure = el<HTMLButtonElement>('reset-exposure');
+const lightZ = el<HTMLInputElement>('light-z');
+const lightY = el<HTMLInputElement>('light-y');
+const resetLight = el<HTMLButtonElement>('reset-light');
 const lineMode = el<HTMLSelectElement>('line-mode');
 const labelSide = el<HTMLSelectElement>('label-side');
 const unit = el<HTMLSelectElement>('unit');
@@ -110,6 +122,12 @@ let interaction: Interaction | null = null;
 let drawMode = false;
 let markId = 1;
 let busy = false;
+let pickingModel = false;
+let nativeImportAvailable = false;
+let importCapabilitiesReady = false;
+let reselectRecord: RenderRecord | undefined;
+let historyTimer: number | undefined;
+const sessionFiles = new Map<string, File[]>();
 let blocked = false;
 let exportPending = false;
 let previewScale = 1;
@@ -194,15 +212,17 @@ const assistant = bindAssistant({
     updateButtons();
     try {
       await new Promise<void>(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
-      tuning = { ao: scene.ao, shadow: scene.shadow, reflection: scene.reflection };
+      tuning = { ao: scene.ao, shadow: scene.shadow, reflection: scene.reflection, lightZ: scene.lightZ, lightY: scene.lightY };
       styleChoice.value = scene.style;
       exposureSlider.valueAsNumber = scene.exposure;
       renderer?.setTuning(tuning);
       renderer?.setMaterialOverrides(edits.overrides());
       updateExposure();
+      updateLightControls();
       renderPreview();
       comparison = edits.beforeLastEdit();
       status(compare ? '渲染已更新 · 按住「对比」查看修改前' : '已恢复上一次助手修改。', 'success');
+      captureRender(compare ? '材质与效果调整' : '撤销渲染修改');
       if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {
         base.animate([{ opacity:.65 }, { opacity:1 }], { duration:220 });
       }
@@ -215,8 +235,56 @@ const assistant = bindAssistant({
   },
 });
 bindSettings(() => void assistant.refreshSettings());
+const renderHistory = bindRenderHistory({
+  flush: () => { window.clearTimeout(historyTimer);captureRender(); },
+  restore: async entry => {
+    captureRender();
+    if(model&&renderHistory.currentKey()===entry.modelKey&&!blocked){
+      await restoreRecordState(entry);
+      renderHistory.begin(entry.modelKey,entry.modelName,entry.source,entry);
+    }else{
+      const cached=sessionFiles.get(entry.id);
+      let selected=cached?{files:cached,source:entry.source}:null;
+      if(!selected&&entry.source.nativeId){
+        showProgress('正在读取历史模型…');
+        try{selected=await nativeModelFiles(entry.source.nativeId);}finally{hideProgress();}
+      }
+      if(!selected)throw new Error('请选择这次导入的源文件，以恢复模型和最后效果。');
+      if(!await importModel(selected.files,selected.source,entry))throw new Error(el('message').textContent||'历史模型载入失败。');
+      await restoreRecordState(entry);
+    }
+    status('已恢复「'+entry.modelName+'」的最后效果。','success');
+  },
+  reselect: entry => void openModelPicker(entry),
+});
+async function restoreRecordState(entry: RenderRecord) {
+  const previousView=selectedView();
+  viewChoice.value=String(entry.view);
+  if(previousView!==entry.view){comparisonView=-1;renderPreview();redraw();}
+  try {
+    await assistant.restore(entry.materials,entry.scene);
+    if(model?.kind==='OBJ'){
+      model.unit=Object.hasOwn(unitChoices,entry.unit)?entry.unit:'';
+      model.unitFactor=unitChoices[model.unit]??null;unit.value=model.unit;
+    }
+    history.commit(structuredClone(entry.notes));selected=null;sync();
+  }catch(error){viewChoice.value=String(previousView);renderPreview();redraw();throw error;}
+}
+function captureRender(_label?: string) {
+  if (!model || !renderer || blocked) return;
+  const thumbnail=document.createElement('canvas');thumbnail.width=900;thumbnail.height=600;
+  const ctx=thumbnail.getContext('2d')!;
+  ctx.imageSmoothingQuality='high';ctx.drawImage(base,0,0,900,600);
+  drawNotes(ctx,900/SHEET_WIDTH,model,history.current,{preset:selectedView(),offset:{x:0,y:0}});
+  renderHistory.update({thumbnail:thumbnail.toDataURL('image/jpeg',.82),
+    scene:{...tuning,style:selectedStyle(),exposure:exposureSlider.valueAsNumber},view:selectedView(),materials:assistant.snapshot(),
+    notes:structuredClone(history.current),unit:model.unit});
+}
+function queueRenderHistory(){window.clearTimeout(historyTimer);historyTimer=window.setTimeout(()=>captureRender(),180);}
+void readSettings().then(settings=>{nativeImportAvailable=settings.nativeImport;}).catch(()=>{}).finally(()=>{importCapabilitiesReady=true;updateButtons();});
+window.addEventListener('pagehide',()=>captureRender());
 const assistantToggle = el<HTMLButtonElement>('assistant-toggle');
-const assistantPanel = el('assistant-panel');
+const assistantPanel = el('left-rail');
 assistantToggle.onclick = () => {
   assistantPanel.hidden = !assistantPanel.hidden;
   assistantPanel.parentElement?.classList.toggle('has-assistant', !assistantPanel.hidden);
@@ -278,10 +346,14 @@ function redraw() {
   labelBounds = drawNotes(overlayContext, previewScale, model, history.current, {
     selected, draft, preset: selectedView(), handleRadius: 4 * sheetUnitsPerPixel(),
   });
+  if(model&&!busy&&!exportPending&&!assistantRendering)queueRenderHistory();
 }
 
 function renderPreview() {
-  if (renderer && model) renderer.preview(baseContext, previewScale, selectedView(), selectedStyle(), exposureSlider.valueAsNumber);
+  if (renderer && model) {
+    renderer.setTuning(tuning);
+    renderer.preview(baseContext, previewScale, selectedView(), selectedStyle(), exposureSlider.valueAsNumber);
+  }
   else drawEmpty(baseContext, previewScale);
 }
 
@@ -300,8 +372,8 @@ function fitPreview() {
 }
 
 function updateButtons() {
-  const busyRendering = busy || exportPending || assistantRendering;
-  openButton.disabled = busyRendering;
+  const busyRendering = busy || pickingModel || exportPending || assistantRendering;
+  openButton.disabled = busyRendering || !importCapabilitiesReady;
   exportButton.disabled = !model || busyRendering || blocked;
   exportButton.textContent = exportPending ? '正在导出…' : '导出 PNG';
   undoButton.disabled = !history.canUndo;
@@ -317,6 +389,10 @@ function updateButtons() {
   compareButton.disabled = !comparison || busyRendering || blocked;
   if (compareButton.disabled) showBefore(false);
   assistant.setLocked(busyRendering || blocked);
+  renderHistory.setLocked(busyRendering || !importCapabilitiesReady);
+  el('premium-controls').hidden=selectedStyle()!=='premium';
+  lightZ.disabled=lightY.disabled=viewChoice.disabled||selectedStyle()!=='premium';
+  resetLight.disabled=lightZ.disabled||(tuning.lightZ===0&&tuning.lightY===0);
 }
 
 function updateSelection() {
@@ -452,8 +528,9 @@ viewChoice.onchange = () => {
   renderPreview();
   redraw();
   if (!compareFrame.hidden) showBefore(true);
+  captureRender();
 };
-styleChoice.onchange = () => { updateButtons(); renderPreview(); };
+styleChoice.onchange = () => { updateButtons(); renderPreview(); captureRender('切换渲染风格'); };
 function updateExposure() {
   const value = exposureSlider.valueAsNumber;
   exposureOutput.textContent = value > 0 ? '+' + value : String(value);
@@ -467,11 +544,32 @@ exposureSlider.oninput = () => {
     if (!busy && !exportPending) renderPreview();
   });
 };
+exposureSlider.onchange = () => { flushPreview(); captureRender('调整曝光'); };
 resetExposure.onclick = () => {
   exposureSlider.valueAsNumber = exposureControl.default;
   updateExposure();
   renderPreview();
+  captureRender('重置曝光');
 };
+function updateLightControls() {
+  lightZ.valueAsNumber=tuning.lightZ;lightY.valueAsNumber=tuning.lightY;
+  el('light-z-value').textContent=tuning.lightZ+'°';el('light-y-value').textContent=tuning.lightY+'°';
+  lightZ.setAttribute('aria-valuetext',tuning.lightZ+' 度，水平旋转');lightY.setAttribute('aria-valuetext',tuning.lightY+' 度，垂直旋转');
+  resetLight.disabled=lightZ.disabled||(tuning.lightZ===0&&tuning.lightY===0);
+}
+function flushPreview() {
+  if(exposureFrame){cancelAnimationFrame(exposureFrame);exposureFrame=0;}
+  renderPreview();
+}
+for(const slider of [lightZ,lightY]) {
+  slider.oninput=()=>{
+    tuning={...tuning,lightZ:lightZ.valueAsNumber,lightY:lightY.valueAsNumber};
+    updateLightControls();comparisonView=-1;
+    if(!exposureFrame)exposureFrame=requestAnimationFrame(()=>{exposureFrame=0;if(!busy&&!exportPending)renderPreview();});
+  };
+  slider.onchange=()=>{flushPreview();captureRender('调整光箱方向');};
+}
+resetLight.onclick=()=>{tuning={...tuning,lightZ:0,lightY:0};updateLightControls();comparisonView=-1;flushPreview();captureRender('光箱归零');};
 lineMode.onchange = () => {
   const mode = lineMode.value as LineMode;
   if (selected === null) { nextLineMode = mode; return; }
@@ -610,8 +708,12 @@ overlay.addEventListener('pointerup', event => {
 overlay.addEventListener('lostpointercapture', event => { if (interaction?.pointer === event.pointerId) cancelInteraction(); });
 overlay.addEventListener('pointercancel', event => { if (interaction?.pointer === event.pointerId) cancelInteraction(); });
 
-async function importModel(files: File[]) {
-  if (busy || exportPending || assistantRendering || files.length === 0) return;
+function browserSource(files:File[],kind:'browser'|'drop'='browser'):ImportSource {
+  return {kind,files:files.map(file=>({name:file.name,size:file.size,modified:file.lastModified}))};
+}
+async function importModel(files: File[],source=browserSource(files),record?:RenderRecord):Promise<boolean> {
+  if (busy || pickingModel || exportPending || assistantRendering || files.length === 0) return false;
+  window.clearTimeout(historyTimer);captureRender();
   if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
   cancelInteraction();
   busy = true;
@@ -623,6 +725,8 @@ async function importModel(files: File[]) {
   try {
     await new Promise(resolve => window.requestAnimationFrame(() => window.setTimeout(resolve, 0)));
     loaded = await loadModel(files, showProgress);
+    const modelKey=await renderModelKey(files);
+    if(record&&record.modelKey!==modelKey)throw new Error('源文件内容或名称已变化，请通过「导入模型」创建新记录。');
     showProgress('正在绘制预览…');
     try { renderer ??= new SheetRenderer(); }
     catch { throw new Error('浏览器未能启用 WebGL2。请检查硬件加速，或用 Chrome / Edge 打开。'); }
@@ -636,8 +740,9 @@ async function importModel(files: File[]) {
     assistant.setModel(loaded);
     exposureSlider.valueAsNumber = exposureControl.default;
     updateExposure();
+    updateLightControls();
     blocked = false;
-    history.reset(blankNotes());
+    history.reset({...blankNotes(),subtitle:modelCaption(model.name)});
     selected = null;
     markId = 1;
     el('editor').hidden = false;
@@ -651,6 +756,13 @@ async function importModel(files: File[]) {
     status(['模型已导入。', model.unitFactor === null ? '源单位未知，可在右侧设置单位或手填标注。' : '',
       ...model.warnings].filter(Boolean).join(' '), 'success');
     sync();
+    const id=renderHistory.begin(modelKey,model.name,source,record);
+    if(source.kind!=='native'){
+      sessionFiles.set(id,files);
+      while(sessionFiles.size>18)sessionFiles.delete(sessionFiles.keys().next().value!);
+    }
+    if(!record)captureRender('初始渲染');
+    return true;
   } catch (error) {
     if (loaded && loaded !== model) disposeModel(loaded);
     if (previous && renderer) {
@@ -664,6 +776,7 @@ async function importModel(files: File[]) {
     blocked = true;
     const message = error instanceof Error ? error.message : String(error);
     status(message + (previous ? ' 画布保留上一模型。请重新导入后再导出。' : ''), 'error');
+    return false;
   } finally {
     hideProgress();
     busy = false;
@@ -671,12 +784,31 @@ async function importModel(files: File[]) {
   }
 }
 
-openButton.onclick = () => filePicker.click();
+async function finishModelSelection(files:File[],source:ImportSource,record?:RenderRecord){
+  if(await importModel(files,source,record)&&record){
+    try{await restoreRecordState(record);captureRender();status('已恢复「'+record.modelName+'」的最后效果。','success');}
+    catch(error){status(error instanceof Error?error.message:'恢复记录失败。','error');}
+  }
+}
+async function openModelPicker(record?:RenderRecord){
+  if(!nativeImportAvailable){reselectRecord=record;filePicker.click();return;}
+  pickingModel=true;updateButtons();showProgress('请选择模型及材质文件…');
+  try{
+    const selected=await nativeModelFiles();
+    pickingModel=false;hideProgress();updateButtons();
+    if(selected)await finishModelSelection(selected.files,selected.source,record);
+    else status('已取消导入。');
+  }catch(error){status(error instanceof Error?error.message:'模型选择失败。','error');}
+  finally{pickingModel=false;hideProgress();updateButtons();}
+}
+openButton.onclick = () => void openModelPicker();
 filePicker.addEventListener('change', () => {
   const files = Array.from(filePicker.files ?? []);
   filePicker.value = '';
-  void importModel(files);
+  const record=reselectRecord;reselectRecord=undefined;
+  void finishModelSelection(files,browserSource(files),record);
 });
+filePicker.addEventListener('cancel',()=>{reselectRecord=undefined;});
 let dragDepth = 0;
 paper.addEventListener('dragenter', event => {
   if (!event.dataTransfer?.types.includes('Files')) return;
@@ -695,13 +827,15 @@ paper.addEventListener('drop', event => {
   event.preventDefault();
   dragDepth = 0;
   paper.dataset.drop = 'false';
-  void importModel(Array.from(event.dataTransfer?.files ?? []));
+  const files=Array.from(event.dataTransfer?.files??[]);
+  void importModel(files,browserSource(files,'drop'));
 });
 window.addEventListener('dragover', event => { if (event.dataTransfer?.types.includes('Files')) event.preventDefault(); });
 window.addEventListener('drop', event => { if (event.dataTransfer?.files.length) event.preventDefault(); });
 
 async function savePng() {
   if (!model || !renderer || busy || blocked || exportPending || assistantRendering) return;
+  if(exposureFrame)flushPreview();
   const exportModel = model;
   const notes = structuredClone(history.current);
   const preset = selectedView();
@@ -726,7 +860,8 @@ async function savePng() {
     const encoded = await new Promise<Blob | null>(resolve => sheet.toBlob(resolve, 'image/png'));
     if (!encoded) throw new Error('PNG 生成失败，请重试。');
     const blob = await withPrintResolution(encoded, 300);
-    const name = ((notes.title.trim() || exportModel.name.replace(/\.[^.]+$/, '')).replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').slice(0, 90) || '模型出图') + '.png';
+    captureRender('导出 PNG');
+    const name = pngFileName(notes.title,notes.subtitle,exportModel.name);
     showProgress('正在保存 PNG…');
     const local = await saveLocalExport(name, blob);
     if (local.cancelled) {

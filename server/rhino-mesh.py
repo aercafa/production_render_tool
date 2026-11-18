@@ -71,10 +71,15 @@ def convert():
             l = layer_ids.get(l.ParentLayerId)
         return True
 
+    def object_visible(a):
+        return (a.Visible and a.Mode != Rhino.DocObjects.ObjectMode.Hidden
+                and a.Space != Rhino.DocObjects.ActiveSpace.PageSpace
+                and visible(layers.get(a.LayerIndex)))
+
     def visit(obj, xform, stack, parent_material, parent_color):
         g, a = obj.Geometry, obj.Attributes
         layer = layers.get(a.LayerIndex)
-        if not a.Visible or not visible(layer):
+        if not object_visible(a):
             return
         name = a.Name or str(a.ObjectId)
         material_source = Rhino.DocObjects.ObjectMaterialSource
@@ -144,8 +149,7 @@ def convert():
 
     visible_objects = [
         obj for obj in src.Objects
-        if not obj.Attributes.IsInstanceDefinitionObject and obj.Attributes.Visible
-        and visible(layers.get(obj.Attributes.LayerIndex))
+        if not obj.Attributes.IsInstanceDefinitionObject and object_visible(obj.Attributes)
     ]
     total = len(visible_objects)
     progress('meshing', 0, total)

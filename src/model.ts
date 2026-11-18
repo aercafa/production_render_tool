@@ -26,10 +26,11 @@ type CheckResult = {
   unit: string;
   unitFactor: number | null;
   legacyMaterials: Record<string, number>;
+  visibleIds: string[];
   error?: string;
 };
 
-function inspectRhino(buffer: ArrayBuffer): Promise<CheckResult> {
+function inspectRhino(file: Blob): Promise<CheckResult> {
   return new Promise((resolve, reject) => {
     const worker = new Worker(new URL('./rhino-check.worker.ts', import.meta.url), { type: 'module' });
     const cleanup = () => { window.clearTimeout(timeout); worker.terminate(); };
@@ -46,9 +47,46 @@ function inspectRhino(buffer: ArrayBuffer): Promise<CheckResult> {
       cleanup();
       reject(new Error('3DM 读取组件未能启动，请刷新后重试。'));
     };
-    const copy = buffer.slice(0);
-    worker.postMessage(copy, [copy]);
+    worker.postMessage(file);
   });
+}
+
+type RhinoLoaderObject = {
+  objectType: string;
+  attributes: { id: string; isInstanceDefinitionObject?: boolean; objectIds?: string[] };
+  geometry: { parentIdefId?: string; xform?: { array: number[] } } | null;
+};
+
+function visibleRhinoObjects(objects: RhinoLoaderObject[], visible: Set<string>) {
+  const definitions = new Map(objects.filter(obj => obj.objectType === 'InstanceDefinition')
+    .map(obj => [obj.attributes.id,obj]));
+  const content = objects.filter(obj => visible.has(obj.attributes.id) && obj.objectType !== 'InstanceDefinition');
+  const byId = new Map(content.map(obj => [obj.attributes.id,obj]));
+  const refs: RhinoLoaderObject[] = [];
+  // Three's loader handles one level. Compose nested transforms before passing it the visible placements.
+  function place(ref: RhinoLoaderObject, parent: THREE.Matrix4, stack: string[]) {
+    const id = ref.geometry?.parentIdefId;
+    const transform = ref.geometry?.xform;
+    if (!id || !transform) return;
+    const definition = definitions.get(id);
+    if (!definition || stack.includes(id) || stack.length >= 64) {
+      throw new Error('3DM 含无法展开的可见块，请检查块定义。');
+    }
+    const matrix = parent.clone().multiply(new THREE.Matrix4().set(...transform.array as Parameters<THREE.Matrix4['set']>));
+    const members = (definition.attributes.objectIds ?? []).map(member => byId.get(member));
+    if (members.some(member => member && member.objectType !== 'InstanceReference')) {
+      refs.push({ ...ref, geometry:{ parentIdefId:id, xform:{ array:matrix.clone().transpose().toArray() } } });
+    }
+    for (const member of members) {
+      if (member?.objectType === 'InstanceReference') place(member,matrix,[...stack,id]);
+    }
+  }
+  for (const ref of content) {
+    if (ref.objectType === 'InstanceReference' && !ref.attributes.isInstanceDefinitionObject) {
+      place(ref,new THREE.Matrix4(),[]);
+    }
+  }
+  return [...content.filter(obj => obj.objectType !== 'InstanceReference'), ...definitions.values(), ...refs];
 }
 
 function biasCoveredCaps(parts: { mesh: THREE.Mesh; bounds: THREE.Box3 }[], tolerance: number) {
@@ -186,22 +224,21 @@ async function readOBJ(file: File, files: File[], onProgress?: OperationProgress
 }
 
 async function read3DM(file: File, onProgress?: OperationProgress) {
-  let buffer = await file.arrayBuffer();
+  let renderFile: Blob = file;
   onProgress?.('正在检查 3DM 显示网格…');
-  const result = await inspectRhino(buffer);
-  let legacyMaterials = result.legacyMaterials;
+  const result = await inspectRhino(file);
+  let checked = result;
   const warnings = new Set<string>();
   if (result.issues.length) {
     const extra = result.issues.length > 3 ? '；另有 ' + (result.issues.length - 3) + ' 个部件' : '';
     onProgress?.('发现 3DM 缺少显示网格，正在检查缓存或调用本机 Rhino 生成网格…');
     try {
-      const converted = await prepareMesh(buffer, onProgress);
-      buffer = converted.buffer;
+      const converted = await prepareMesh(file, onProgress);
+      renderFile = converted.file;
       onProgress?.('网格已就绪，正在核验并加载预览…');
-      const checked = await inspectRhino(buffer);
+      checked = await inspectRhino(renderFile);
       if (checked.issues.length || checked.unitFactor !== result.unitFactor)
         throw new Error('处理结果含无效网格或单位与原件不一致。');
-      legacyMaterials = checked.legacyMaterials;
       warnings.add(converted.cached ? '已复用 24 小时网格缓存。' : '已自动生成显示网格，并缓存 24 小时。');
     } catch (error) {
       throw new Error('3DM 缺少有效显示网格：' + result.issues.slice(0, 3).join('；') + extra + '。自动处理未完成：' +
@@ -218,8 +255,14 @@ async function read3DM(file: File, onProgress?: OperationProgress) {
     return texturePlaceholder;
   });
   const loader = new Rhino3dmLoader(manager).setLibraryPath('local-rhino/').setWorkerLimit(1);
+  const visible = new Set(checked.visibleIds);
   // The loader otherwise merges different Rhino IDs that share a name and color.
-  const comparison = loader as Rhino3dmLoader & { _compareMaterials: (material: THREE.Material) => THREE.Material };
+  const comparison = loader as Rhino3dmLoader & {
+    _compareMaterials: (material: THREE.Material) => THREE.Material;
+    _createGeometry: (data: { objects: RhinoLoaderObject[] }) => THREE.Object3D;
+  };
+  const createGeometry = comparison._createGeometry.bind(loader);
+  comparison._createGeometry = data => createGeometry({ ...data, objects:visibleRhinoObjects(data.objects,visible) });
   const compare = comparison._compareMaterials.bind(loader);
   const sourceMaterials = new Map<string, THREE.Material>();
   comparison._compareMaterials = material => {
@@ -232,7 +275,7 @@ async function read3DM(file: File, onProgress?: OperationProgress) {
   };
   try {
     onProgress?.('正在加载显示网格…');
-    const root = await loader.parseAsync(buffer);
+    const root = await loader.parseAsync(await renderFile.arrayBuffer());
     const inspected = new Set<THREE.Material>();
     root.traverse(object => {
       if (!(object instanceof THREE.Mesh)) return;
@@ -240,7 +283,7 @@ async function read3DM(file: File, onProgress?: OperationProgress) {
       for (const material of materials) {
         if (!(material instanceof THREE.MeshPhysicalMaterial) || inspected.has(material)) continue;
         inspected.add(material);
-        const shine = legacyMaterials[material.userData.id];
+        const shine = checked.legacyMaterials[material.userData.id];
         // The loader supplies legacy byte colors as normalized RGB. They still need sRGB decoding.
         if (shine !== undefined) {
           material.color.convertSRGBToLinear();
@@ -258,9 +301,9 @@ async function read3DM(file: File, onProgress?: OperationProgress) {
         }
       }
     });
-    const loaderWarnings = root.userData.warnings as { type?: string; message?: string }[] | undefined;
+    const loaderWarnings = root.userData.warnings as { type?: string; guid?: string }[] | undefined;
     for (const warning of loaderWarnings ?? []) {
-      if (warning.type === 'missing mesh' || /no mesh|missing mesh|no conversion/i.test(warning.message ?? '')) {
+      if (warning.type === 'missing mesh' && (!warning.guid || visible.has(warning.guid))) {
         throw new Error('存在无法渲染的 3DM 部件，请导出为完整网格。');
       }
     }

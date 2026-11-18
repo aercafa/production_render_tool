@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { premiumMaterial, premiumSurface } from './studio';
+import { applyMicroFinish, premiumMaterial, premiumSurface } from './studio';
 import { premiumStudio } from './render-config';
 import type { MaterialOverrides, MaterialValues, RenderTuning } from './assistant-edits';
 import { applyProceduralSurface } from './procedural-wood';
@@ -162,6 +162,7 @@ function overrideMaterial(material: THREE.Material, changes: Partial<MaterialVal
   if (changes.color !== undefined) edited.color.set(changes.color);
   if (changes.emissiveColor !== undefined) edited.emissive.set(changes.emissiveColor);
   if (changes.emissiveIntensity !== undefined) edited.emissiveIntensity = changes.emissiveIntensity;
+  if (preset && edited instanceof THREE.MeshStandardMaterial && ['metal_matte','metal_polished','plastic','rubber'].includes(pattern)) applyMicroFinish(edited);
   return edited;
 }
 

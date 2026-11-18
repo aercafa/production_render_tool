@@ -1,5 +1,5 @@
 import { askAssistant, readSettings, type ChatMessage } from './local-service';
-import { AssistantEdits, type Change, type SceneValues } from './assistant-edits';
+import { AssistantEdits, type Change, type MaterialSnapshot, type SceneValues } from './assistant-edits';
 import type { RenderModel } from './model';
 
 export const assistantMarkup = `
@@ -299,6 +299,20 @@ export function bindAssistant(options: {
       message('已选中：' + part.name);
     },
     overrides: () => edits?.overrides(),
+    snapshot: () => ensureMaterials()?.snapshot() ?? [],
+    async restore(snapshot: MaterialSnapshot, next: SceneValues) {
+      const state=ensureMaterials();
+      if (!state || locked || processing) throw new Error('请等待当前处理完成后再恢复记录。');
+      pending=undefined;
+      processing='正在恢复历史材质与灯光…';update();
+      try {
+        const scene=state.restore(snapshot,options.scene(),next);
+        try { await options.render(scene,state,true); }
+        catch(error){try{await options.render(state.undo(options.scene()),state,false);}catch{/* Report the original rendering error. */}throw error;}
+        recordOutcome('用户已恢复一条渲染历史。请读取最新材质与灯光参数。');
+        message('已恢复渲染历史，可撤销或继续调整。');
+      } finally { processing='';update(); }
+    },
     setLocked(value: boolean) { locked = value; update(); },
   };
 }

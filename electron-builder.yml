@@ -9,6 +9,7 @@ files:
   - server/assistant.mjs
   - server/material-rules.mjs
   - server/material-presets.json
+  - server/model-imports.mjs
 extraResources:
   - from: server/rhino-mesh.py
     to: rhino-mesh.py
