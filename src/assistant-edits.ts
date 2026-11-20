@@ -4,7 +4,7 @@ import { premiumMaterial, premiumSurface } from './studio';
 import { premiumStudio } from './render-config';
 import type { RenderStyle } from './view-effects';
 import { grainDirections, type GrainDirection } from './procedural-wood';
-import presets from '../server/material-presets.json';
+import presets from '../server/material-presets.json' with {type:'json'};
 
 export type MaterialPreset = keyof typeof presets;
 export const materialPresets = presets;
@@ -74,6 +74,8 @@ export const styleLabels = { studio: '棚拍材质', premium: '高保真棚拍',
 function inventory(model: RenderModel) {
   const groups = new Map<string, ModelMaterial>();
   const parts: ModelMaterial[] = [];
+  const sourceIds = new Map<string,string>();
+  const aliases = new Map<string,string>();
   const labels = new Map<string, number>();
   const descriptions = new Map<THREE.Material, Map<ReturnType<typeof premiumSurface>,
     { values: MaterialValues; emits: boolean }>>();
@@ -82,7 +84,7 @@ function inventory(model: RenderModel) {
     const size = object.geometry.boundingBox?.getSize(new THREE.Vector3());
     const longAxis = !size || (size.x >= size.y && size.x >= size.z) ? 'x' : size.y >= size.z ? 'y' : 'z';
     const materials = Array.isArray(object.material) ? object.material : [object.material];
-    const sourceMaterials = object.userData.workbenchMaterials as { id: string; name: string }[] | undefined;
+    const sourceMaterials = object.userData.workbenchMaterials as { id: string; originalId?: string; name: string }[] | undefined;
     materials.forEach((material, index) => {
       if (!(material instanceof THREE.MeshStandardMaterial || material instanceof THREE.MeshPhongMaterial)) return;
       const source = sourceMaterials?.[index];
@@ -114,6 +116,8 @@ function inventory(model: RenderModel) {
       }
       const { values, emits } = description;
       const key = source?.id ?? material.uuid;
+      const originalKey = source?.originalId ?? key;
+      if (!sourceIds.has(originalKey)) sourceIds.set(originalKey,'m'+(sourceIds.size+1));
       const group = groups.get(key);
       if (group) {
         group.slots.push({ mesh: object, index });
@@ -125,10 +129,11 @@ function inventory(model: RenderModel) {
       } else {
         const number = (labels.get(label) ?? 0) + 1;
         labels.set(label, number);
-        groups.set(key, { id: 'm' + (groups.size + 1), name: number === 1 ? label : label + '（' + number + '）',
+        groups.set(key, { id: sourceIds.get(originalKey)!, name: number === 1 ? label : label + '（' + number + '）',
           objects: new Set(object.name ? [object.name] : []), slots: [{ mesh: object, index }],
           values, emits, textured: !!material.map, varies: false, longAxes: new Set([longAxis]) });
       }
+      aliases.set(sourceIds.get(originalKey)!,groups.get(key)!.id);
       const bounds = object.userData.workbenchBounds as THREE.Box3;
       const dims = bounds.getSize(new THREE.Vector3());
       const center = bounds.getCenter(new THREE.Vector3()).multiplyScalar(model.group.scale.x).add(model.group.position);
@@ -149,40 +154,43 @@ function inventory(model: RenderModel) {
           center: center.toArray(), role } });
     });
   });
-  return { groups, parts };
+  return { groups, parts, aliases };
 }
 
 export class AssistantEdits {
   readonly materials: Map<string, ModelMaterial>;
   readonly parts: Map<string, ModelMaterial>;
+  private readonly aliases: Map<string,string>;
   private values: OverridesById = new Map();
   private history: { values: OverridesById; scene: SceneValues; after: SceneValues }[] = [];
 
   constructor(private readonly model: RenderModel) {
-    const { groups, parts } = inventory(model);
+    const { groups, parts, aliases } = inventory(model);
+    this.aliases = aliases;
     this.materials = new Map(Array.from(groups.values(), material => [material.id, material]));
     this.parts = new Map(parts.map(part => [part.id, part]));
   }
 
   get canUndo() { return this.history.length > 0; }
   target(id: string) { return this.materials.get(id) ?? this.parts.get(id); }
+  materialFor(id: string) {
+    return this.materials.get(this.parts.get(id)?.part?.material ?? this.aliases.get(id) ?? id);
+  }
   partAt(mesh: THREE.Mesh, index: number) {
     return [...this.parts.values()].find(part => part.part?.mesh === mesh && part.part.index === index);
   }
   private currentValues(id: string) {
-    const part = this.parts.get(id)?.part;
-    const group = part && this.values.get(part.material);
-    const local = this.values.get(id);
-    return local?.pattern ? local : { ...group, ...local };
+    return this.values.get(this.materialFor(id)?.id ?? id) ?? {};
   }
 
   context(scope: string, scene: SceneValues) {
-    const selected = this.target(scope);
+    const selected = this.materialFor(scope);
     const truncated = !selected && this.materials.size > 55;
     const materials = selected ? [this.materials.get(selected.part?.material ?? selected.id)!]
-      : truncated ? [] : [...this.materials.values()];
-    const candidates = selected?.part ? [selected] : [...this.parts.values()]
-      .filter(target => !selected || target.part?.material === selected.id);
+      : [...this.materials.values()].slice(0,55);
+    const listed = new Set(materials.map(material=>material.id));
+    const candidates = [...this.parts.values()]
+      .filter(target => listed.has(target.part!.material));
     const parts = candidates.slice(0, truncated ? 90 : 60).map(target => {
       const part = target.part!;
       const rounded = (values: number[]) => values.map(value => +value.toFixed(3));
@@ -190,7 +198,8 @@ export class AssistantEdits {
         size:rounded(part.size), center:rounded(part.center), color:this.currentValues(target.id).color ?? target.values.color,
         textured:target.textured, surface:{ ...target.values, ...this.currentValues(target.id) } };
     });
-    return {
+    const context = {
+      selectionMode: 'shared-material',
       current: scene, selectedMaterial: selected && !selected.part ? selected.id : null,
       selectedPart: selected?.part ? selected.id : null, totalMaterials: this.materials.size,
       parts, totalParts:candidates.length, unit:this.model.unit,
@@ -206,6 +215,10 @@ export class AssistantEdits {
         autoGrainAxes: [...part.longAxes],
       })),
     };
+    // Leave room for the request envelope; a large assembly must not become an API error.
+    while (JSON.stringify(context).length > 56000 && context.parts.length) { context.parts.pop(); context.requiresMaterialSelection = true; }
+    while (JSON.stringify(context).length > 56000 && context.materials.length) { context.materials.pop(); context.requiresMaterialSelection = true; }
+    return context;
   }
 
   validate(items: unknown[], scope: string, available: Set<string>, scene: SceneValues): Change[] {
@@ -216,7 +229,8 @@ export class AssistantEdits {
       if (!c || typeof c.target !== 'string' || typeof c.property !== 'string') {
         throw new Error('修改建议格式不正确。');
       }
-      const { target, property, value } = c;
+      const { property, value } = c;
+      const target = c.target === 'scene' ? 'scene' : this.materialFor(c.target)?.id ?? c.target;
       const part = this.target(target);
       let valid = false;
       if (target === 'scene') {
@@ -225,7 +239,7 @@ export class AssistantEdits {
         if (property === 'ao' || property === 'shadow') valid = numberIn(value, 1);
         if (property === 'reflection') valid = numberIn(value, 2);
         if (property === 'lightZ' || property === 'lightY') valid = typeof value === 'number' && Number.isFinite(value) && value >= -180 && value <= 180;
-      } else if (part && available.has(target) && (!scope || scope === target || part.part?.material === scope)) {
+      } else if (part && (available.has(target) || available.has(c.target)) && (!scope || this.materialFor(scope)?.id === target)) {
         if (property === 'color' || property === 'emissiveColor') valid = typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value);
         if (property === 'roughness' || property === 'metalness') valid = numberIn(value, 1);
         if (property === 'emissiveIntensity') valid = numberIn(value, 2);
@@ -237,10 +251,18 @@ export class AssistantEdits {
         if (property === 'grainScale') valid = typeof value === 'number' && value >= .4 && value <= 2.5;
       }
       const key = target + ':' + property;
-      if (!valid || seen.has(key)) throw new Error('建议包含无效、重复或超出所选材质的修改，请重新描述。');
+      if (!valid) throw new Error('建议包含无效或超出所选材质的修改，请重新描述。');
+      if (seen.has(key)) {
+        const duplicate = items.find(other => {
+          const entry = other as Change;
+          return (this.materialFor(entry.target)?.id ?? entry.target) === target && entry.property === property;
+        }) as Change;
+        if (duplicate.value !== value) throw new Error('同一种材质收到互相冲突的参数，请统一要求后重试。');
+        return null;
+      }
       seen.add(key);
       return { target, property, value } as Change;
-    });
+    }).filter((change): change is Change => change !== null);
     for (const change of changes) {
       if (change.target === 'scene' || change.property === 'pattern') continue;
       const pattern = changes.find(item => item.target === change.target && item.property === 'pattern')?.value
@@ -303,6 +325,7 @@ export class AssistantEdits {
   }
 
   apply(changes: Change[], scene: SceneValues) {
+    changes=changes.map(change=>({...change,target:this.materialFor(change.target)?.id??change.target}));
     const next = { ...scene };
     const values = new Map(this.values);
     for (const { target, property, value } of changes) {
@@ -350,10 +373,11 @@ export class AssistantEdits {
   restore(snapshot: MaterialSnapshot, current: SceneValues, next: SceneValues) {
     const values: OverridesById = new Map();
     for (const [id, entry] of snapshot) {
-      if (!this.target(id) || !entry || typeof entry !== 'object' || Array.isArray(entry) || Object.keys(entry).some(key => !validStoredMaterial(key, entry[key as MaterialProperty]))) {
+      const material = this.materialFor(id);
+      if (!material || !entry || typeof entry !== 'object' || Array.isArray(entry) || Object.keys(entry).some(key => !validStoredMaterial(key, entry[key as MaterialProperty]))) {
         throw new Error('记录中的材质与当前模型不匹配。');
       }
-      values.set(id, structuredClone(entry));
+      values.set(material.id, structuredClone(entry.pattern ? entry : { ...values.get(material.id), ...entry }));
     }
     this.history.push({ values: this.values, scene: { ...current }, after: { ...next } });
     this.values = values;
@@ -362,7 +386,7 @@ export class AssistantEdits {
 
   overrides(source = this.values): MaterialOverrides {
     const result = new Map<THREE.Mesh, Map<number, Partial<MaterialValues>>>();
-    for (const target of [...this.materials.values(), ...this.parts.values()]) {
+    for (const target of this.materials.values()) {
       const values = source.get(target.id);
       if (!values) continue;
       for (const { mesh, index } of target.slots) {

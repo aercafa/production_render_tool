@@ -95,10 +95,18 @@ export async function testAssistant(config: AssistantSettings) {
 
 export type ChatMessage = { role: 'user' | 'assistant'; content: string };
 
-export async function askAssistant(messages: ChatMessage[], scene: object, preview?: string): Promise<{ reply: string; changes: unknown[] }> {
+export async function askAssistant(messages: ChatMessage[], scene: object, preview?: string): Promise<{
+  reply: string; changes: unknown[]; requestId?: string; status: 'proposal'|'clarification'|'no_change'|'answer'; repaired?: boolean;
+}> {
   const response = await request('assistant/chat', { method: 'POST', body: JSON.stringify({ messages, scene, preview }),
+    signal:AbortSignal.timeout(100000),
     headers: { 'Content-Type': 'application/json' } });
   return response.json();
+}
+
+export function reportAssistantOutcome(requestId: string|undefined,phase: 'validated'|'applied'|'no_difference'|'invalid_change'|'render_failed'|'discarded',changes?:number) {
+  if(requestId)void request('assistant/feedback',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({requestId,phase,changes})}).catch(()=>{});
 }
 
 export async function chooseFolder(kind: 'cache' | 'export'): Promise<{ folder: string }> {

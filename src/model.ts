@@ -6,6 +6,7 @@ import rhinoJS from 'rhino3dm/rhino3dm.js?url';
 import rhinoWasm from 'rhino3dm/rhino3dm.wasm?url';
 import type { Axis } from './annotations';
 import { styleRenderMesh } from './studio';
+import { rhinoMaterialAliases } from './material-identity';
 import { prepareMesh, type OperationProgress } from './local-service';
 
 export const unitChoices: Record<string, number> = { mm: 1, cm: 10, m: 1000, in: 25.4, ft: 304.8 };
@@ -155,7 +156,10 @@ function prepare(root: THREE.Object3D, name: string, kind: RenderModel['kind'], 
     mesh.visible = true;
     const originalMaterials = Array.isArray(original.material) ? original.material : [original.material];
     mesh.userData.workbenchMaterials = originalMaterials.map(material => {
-      if (kind === '3DM' && material.userData.id) return { id: 'rhino:' + material.userData.id, name: material.name };
+      if (kind === '3DM' && material.userData.id) return {
+        id: 'rhino:' + (material.userData.workbenchMaterialId ?? material.userData.id),
+        originalId: 'rhino:' + material.userData.id, name: material.name,
+      };
       if (kind === 'OBJ' && material.name) return { id: 'obj:' + material.name, name: material.name };
       return { id: 'unassigned', name: '未分配材质' };
     });
@@ -259,10 +263,14 @@ async function read3DM(file: File, onProgress?: OperationProgress) {
   // The loader otherwise merges different Rhino IDs that share a name and color.
   const comparison = loader as Rhino3dmLoader & {
     _compareMaterials: (material: THREE.Material) => THREE.Material;
-    _createGeometry: (data: { objects: RhinoLoaderObject[] }) => THREE.Object3D;
+    _createGeometry: (data: { objects: RhinoLoaderObject[]; materials: Record<string,unknown>[] }) => THREE.Object3D;
   };
   const createGeometry = comparison._createGeometry.bind(loader);
-  comparison._createGeometry = data => createGeometry({ ...data, objects:visibleRhinoObjects(data.objects,visible) });
+  let aliases = new Map<string,string>();
+  comparison._createGeometry = data => {
+    aliases = rhinoMaterialAliases(data.materials);
+    return createGeometry({ ...data, objects:visibleRhinoObjects(data.objects,visible) });
+  };
   const compare = comparison._compareMaterials.bind(loader);
   const sourceMaterials = new Map<string, THREE.Material>();
   comparison._compareMaterials = material => {
@@ -281,6 +289,7 @@ async function read3DM(file: File, onProgress?: OperationProgress) {
       if (!(object instanceof THREE.Mesh)) return;
       const materials = Array.isArray(object.material) ? object.material : [object.material];
       for (const material of materials) {
+        if (material.userData.id) material.userData.workbenchMaterialId = aliases.get(material.userData.id) ?? material.userData.id;
         if (!(material instanceof THREE.MeshPhysicalMaterial) || inspected.has(material)) continue;
         inspected.add(material);
         const shine = checked.legacyMaterials[material.userData.id];

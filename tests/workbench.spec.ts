@@ -36,7 +36,7 @@ test('渲染助手通过兼容 API 修改颜色和程序化木纹，支持确认
     const context = isTest ? null : JSON.parse(body.messages[1].content.slice('当前场景数据：'.length));
     const base = context?.materials.find((material: { name: string }) => material.name === 'base');
     const frame = context?.materials.find((material: { name: string }) => material.name === 'frame');
-    const last = body.messages.at(-1).content;
+    const last = body.messages.findLast((message: {role:string})=>message.role==='user').content;
     const request = typeof last === 'string' ? last : last[0].text;
     const localFrame = context?.parts.find((part: { name: string }) => part.name === '立柱');
     const changes = request === '改一个不存在的部件'
@@ -77,7 +77,8 @@ test('渲染助手通过兼容 API 修改颜色和程序化木纹，支持确认
     await settings.getByRole('button',{name:'保存设置'}).click();
     await expect(settings).toBeHidden();
     const publicSettings = await page.request.get('/api/workbench/settings', { headers:{ 'X-Render-Workbench':'local-v1' } });
-    expect(await publicSettings.text()).not.toContain(apiKey);
+    const publicConfig=await publicSettings.json();
+    expect(JSON.stringify(publicConfig)).not.toContain(apiKey);
     const input = page.getByRole('textbox',{name:'描述想要的效果'});
     const send = page.getByRole('button',{name:'发送',exact:true});
     const preview = () => canvasHash(page, '#base');
@@ -87,7 +88,7 @@ test('渲染助手通过兼容 API 修改颜色和程序化木纹，支持确认
     const beforeFromRear = await preview();
     expect(beforeFromRear).not.toBe(before);
     await view.selectOption({label:'前右低轴测'});
-    const scope = page.getByRole('combobox',{name:'要修改的范围'});
+    const scope = page.getByRole('combobox',{name:'要修改的模型材质'});
     await expect(scope.locator('option', { hasText:'frame（2 处）' })).toHaveCount(1);
     await scope.selectOption({label:'base（1 处）'});
     await input.fill('把底座改成红色');
@@ -277,23 +278,42 @@ test('渲染助手通过兼容 API 修改颜色和程序化木纹，支持确认
     await page.mouse.click(paper.x + paper.width * 744/1200, paper.y + paper.height * 590/800);
     await expect(page.locator('#assistant-feedback')).toContainText('已选中：立柱');
     await page.getByLabel('随本轮发送预览图（需视觉模型）').check();
-    const cabinetPixels = () => page.locator('#base').evaluate((canvas: HTMLCanvasElement) => {
-      const ctx = canvas.getContext('2d')!;
-      return [ [709,450], [744,590] ].map(([x,y]) => Array.from(ctx.getImageData(
-        Math.round(x*canvas.width/1200),Math.round(y*canvas.height/800),1,1).data));
+    const frameSpots=await page.locator('#base').evaluate((canvas:HTMLCanvasElement)=>{
+      const ctx=canvas.getContext('2d')!,scale=canvas.width/1200;
+      return [[416,480],[540,636]].map(([top,bottom])=>{
+        for(let y=top;y<bottom;y++)for(let x=700;x<790;x++){
+          const p=ctx.getImageData(Math.round(x*scale),Math.round(y*scale),1,1).data;
+          if(p[0]>80&&p[0]>p[1]*2&&p[0]>p[2]*2)return [x,y];
+        }
+        throw Error('Missing red frame sample');
+      });
     });
+    const cabinetPixels = () => page.locator('#base').evaluate((canvas: HTMLCanvasElement,spots:number[][]) => {
+      const ctx = canvas.getContext('2d')!;
+      return spots.map(([x,y]) => Array.from(ctx.getImageData(
+        Math.round(x*canvas.width/1200),Math.round(y*canvas.height/800),1,1).data));
+    },frameSpots);
     const [housingBefore, columnBefore] = await cabinetPixels();
     await input.fill('只把立柱改成绿色');
     await send.click();
-    await expect(page.locator('#assistant-changes')).toContainText('立柱（1 处）');
+    await expect(scope.locator('option:checked')).toHaveText('frame（2 处）');
+    await expect(page.locator('#assistant-feedback')).toContainText('已校验');
+    await expect(page.locator('#assistant-changes')).toContainText('frame（2 处）');
     await input.fill('确认');
     await send.click();
     await expect(page.locator('#assistant-feedback')).toContainText('已应用');
     const [housingAfter, columnAfter] = await cabinetPixels();
-    expect(housingAfter).toEqual(housingBefore);
+    expect(housingAfter).not.toEqual(housingBefore);
     expect(columnAfter).not.toEqual(columnBefore);
     expect(columnAfter[1]).toBeGreaterThan(columnAfter[0]);
+    expect(housingAfter[1]).toBeGreaterThan(housingAfter[0]);
     expect(JSON.stringify(requests.at(-1)?.body.messages.at(-1)?.content)).toContain('data:image/jpeg;base64,');
+    const diagnosticsFile=path.join(publicConfig.cacheLocation,'assistant-diagnostics.jsonl');
+    await expect.poll(async()=>readFile(diagnosticsFile,'utf8')).toContain('"phase":"applied"');
+    const diagnostics=await readFile(diagnosticsFile,'utf8');
+    expect(diagnostics).toContain('"phase":"repair"');
+    expect(diagnostics).not.toContain(apiKey);
+    expect(diagnostics).not.toContain('把底座改成红色');
   } finally {
     provider.closeAllConnections();
     await new Promise<void>(resolve => provider.close(() => resolve()));

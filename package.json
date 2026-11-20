@@ -1,10 +1,10 @@
 {
   "name": "render-tool-pm",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "本地模型出图工作台",
   "main": "desktop/main.mjs",
   "scripts": {
-    "test": "playwright test",
+    "test": "node --test tests/*.node.mjs && playwright test",
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build && node scripts/source-build.mjs stamp",
     "preview": "vite preview --host 127.0.0.1",

@@ -1,4 +1,4 @@
-import { askAssistant, readSettings, type ChatMessage } from './local-service';
+import { askAssistant, readSettings, reportAssistantOutcome, type ChatMessage } from './local-service';
 import { AssistantEdits, type Change, type MaterialSnapshot, type SceneValues } from './assistant-edits';
 import type { RenderModel } from './model';
 
@@ -22,7 +22,8 @@ export const assistantMarkup = `
     </div>
     <form id="assistant-form" class="assistant-form">
       <p id="assistant-feedback" class="hint" aria-live="polite"></p>
-      <label class="field">要修改的范围<select id="assistant-scope"></select></label>
+      <label class="field">要修改的模型材质<select id="assistant-scope"></select></label>
+      <p class="hint">编辑整组材质；图上点选后，共用该材质的部件一起更新。</p>
       <button id="assistant-pick" type="button" aria-pressed="false">在图上选部件</button>
       <label class="assistant-vision"><input id="assistant-vision" type="checkbox"> 随本轮发送预览图（需视觉模型）</label>
       <label class="field"><span class="assistant-input-label">描述想要的效果</span>
@@ -57,7 +58,7 @@ export function bindAssistant(options: {
   let edits: AssistantEdits | undefined;
   let model: RenderModel | undefined;
   let messages: ChatMessage[] = [];
-  let pending: { changes: Change[]; scene: SceneValues } | undefined;
+  let pending: { changes: Change[]; scene: SceneValues; requestId?: string } | undefined;
   let configFingerprint = '';
   let session = 0;
   let requesting = false;
@@ -122,10 +123,6 @@ export function bindAssistant(options: {
         const name = material.name + '（' + material.slots.length + ' 处）';
         scope.append(new Option(name, material.id));
       }
-      const group = document.createElement('optgroup');
-      group.label = '局部部件';
-      for (const part of edits.parts.values()) group.append(new Option(part.name + ' · ' + part.id, part.id));
-      scope.append(group);
     }
     return edits;
   }
@@ -158,6 +155,7 @@ export function bindAssistant(options: {
     if (picking) message('请在预览中点击要编辑的表面。');
   };
   get('assistant-discard').onclick = () => {
+    reportAssistantOutcome(pending?.requestId,'discarded');
     pending = undefined;
     recordOutcome('用户已放弃待应用建议。');
     message('已放弃建议。');
@@ -173,15 +171,18 @@ export function bindAssistant(options: {
       return;
     }
     const changes = pending.changes;
+    const requestId=pending.requestId;
     pending = undefined;
     message('');
     processing = '正在应用材质并刷新四视图…';
     update();
     try {
       await options.render(edits.apply(changes, current), edits, true);
+      reportAssistantOutcome(requestId,'applied',changes.length);
       recordOutcome('已应用 ' + changes.length + ' 项修改。请读取最新场景参数。');
       message('已应用 ' + changes.length + ' 项修改。');
     } catch {
+      reportAssistantOutcome(requestId,'render_failed');
       try { await options.render(edits.undo(options.scene()), edits, false); } catch { /* The preview error is reported below. */ }
       message('预览刷新失败，已撤销本次修改。', true);
     } finally {
@@ -233,30 +234,44 @@ export function bindAssistant(options: {
     if (conversation[0].role === 'assistant') conversation.shift();
     message('');
     update();
+    const waiting=window.setTimeout(()=>{
+      if(currentSession===session&&requesting){processing='正在等待模型返回并校验修改，请稍候…';update();}
+    },12000);
+    let requestId: string|undefined;
     try {
       const answer = await askAssistant(conversation, context, includePreview ? options.previewImage() : undefined);
       if (currentSession !== session) return;
+      requestId=answer.requestId;
+      append('assistant', answer.reply);
+      messages.push({ role: 'assistant', content: answer.reply });
       if (answer.changes.length) {
         if (!state) throw new Error('请先导入模型，再应用材质或渲染修改。');
         if (sceneChanged(current, options.scene())) throw new Error('渲染参数已有变化，请重新发送指令。');
         const changes = state.validate(answer.changes, target, available, current);
         if (changes.length) {
-          pending = { changes, scene: current };
+          pending = { changes, scene: current, requestId };
           renderPending();
+          reportAssistantOutcome(requestId,'validated',changes.length);
+          message((answer.repaired?'已自动修正响应格式。':'')+'已校验 '+changes.length+' 项修改，请点击“应用修改”。');
         } else {
+          reportAssistantOutcome(requestId,'no_difference');
+          recordOutcome('建议参数与当前实际值一致，没有应用任何修改。后续请依据最新场景给出有差异的参数。');
           message('建议与当前参数一致，没有待应用的修改。');
         }
       }
-      if (!answer.changes.length && !pending) message('本轮没有可应用的修改。可以点选部件后再描述效果。');
-      append('assistant', answer.reply);
-      messages.push({ role: 'assistant', content: answer.reply });
+      if (!answer.changes.length && !pending) message(answer.status==='clarification'
+        ? '需要明确目标材质，请根据回复在图上点选后重试。'
+        : answer.status==='no_change' ? '当前参数已满足本轮建议，没有修改。' : '已回复。本轮为说明，没有修改材质。');
       messages = messages.slice(-12);
     } catch (error) {
       if (currentSession === session) {
+        reportAssistantOutcome(requestId,'invalid_change');
+        recordOutcome('本轮未应用：'+(error instanceof Error?error.message:String(error)));
         if (!input.value) input.value = content;
         message(error instanceof Error ? error.message : String(error), true);
       }
     } finally {
+      window.clearTimeout(waiting);
       if (currentSession === session) { requesting = false; processing = ''; update(); }
     }
   };
@@ -280,7 +295,7 @@ export function bindAssistant(options: {
   function setModel(next: RenderModel) {
     model = next;
     edits = undefined;
-    scope.replaceChildren(new Option('自动定位材质或部件', ''));
+    scope.replaceChildren(new Option('自动定位模型材质', ''));
     ensureMaterials();
     clearConversation();
   }
@@ -294,9 +309,10 @@ export function bindAssistant(options: {
     pickPart(mesh: Parameters<AssistantEdits['partAt']>[0], index: number) {
       const part = edits?.partAt(mesh,index);
       if (!part) { message('这里没有可编辑的表面，请重新点选。'); return; }
-      scope.value = part.id;
+      const material = edits!.materialFor(part.id)!;
+      scope.value = material.id;
       scope.dispatchEvent(new Event('change'));
-      message('已选中：' + part.name);
+      message('已选中：' + part.name + ' → ' + material.name + '（' + material.slots.length + ' 处将一起修改）');
     },
     overrides: () => edits?.overrides(),
     snapshot: () => ensureMaterials()?.snapshot() ?? [],

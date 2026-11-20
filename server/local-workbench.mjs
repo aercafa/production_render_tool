@@ -28,6 +28,20 @@ const stateHome = path.resolve(process.env.RENDER_WORKBENCH_HOME ||
 const config = path.join(stateHome, 'settings.json');
 const defaults = { cacheLocation: stateHome, exportLocation: '', cacheLocations: [] };
 const signature = Buffer.from([137,80,78,71,13,10,26,10]);
+let diagnosticWrite = Promise.resolve();
+function assistantDiagnostic(event) {
+  // Bounded local metadata only: no prompts, replies, preview images, model paths or API keys.
+  diagnosticWrite = diagnosticWrite.catch(()=>{}).then(async()=>{
+    await fs.mkdir(stateHome,{recursive:true});
+    const file=path.join(stateHome,'assistant-diagnostics.jsonl');
+    const info=await fs.stat(file).catch(()=>null);
+    if(info?.size>1024*1024)await fs.rename(file,file+'.previous').catch(async()=>{
+      await fs.unlink(file+'.previous').catch(()=>{});await fs.rename(file,file);
+    });
+    await fs.appendFile(file,JSON.stringify({time:new Date().toISOString(),...event})+'\n',{mode:0o600});
+  });
+  return diagnosticWrite.catch(()=>{});
+}
 
 function failure(message, status = 400) {
   return Object.assign(new Error(message), { status });
@@ -359,8 +373,22 @@ export function createWorkbenchService({ authorize = localRequest, selectFolder,
         } else if (route === 'POST /assistant/chat') {
           if (!settings.assistant?.url) throw failure('请在设置中保存 API URL 和模型名。');
           const input = await jsonBody(req, 640 * 1024);
-          try { json(res,200,await chatAssistant(settings.assistant, input)); }
-          catch (error) { throw failure(error.message, 502); }
+          const requestId=randomUUID(),started=Date.now();
+          await assistantDiagnostic({requestId,phase:'request',materials:input?.scene?.materials?.length??0,
+            parts:input?.scene?.parts?.length??0,selected: /^m\d+$/.test(input?.scene?.selectedMaterial)?input.scene.selectedMaterial:null,preview:!!input?.preview});
+          const trace=event=>assistantDiagnostic({requestId,elapsed:Date.now()-started,...event});
+          try { json(res,200,{...await chatAssistant(settings.assistant,input,trace),requestId}); }
+          catch (error) {
+            await trace({phase:'error',reason:error.message.replaceAll(settings.assistant.key||'\0','［已隐藏］').slice(0,200)});
+            throw failure(error.message,502);
+          }
+        } else if (route === 'POST /assistant/feedback') {
+          const input=await jsonBody(req,4096);
+          if(typeof input.requestId!=='string'||!/^[0-9a-f-]{36}$/.test(input.requestId)||
+            !['validated','applied','no_difference','invalid_change','render_failed','discarded'].includes(input.phase))throw failure('助手反馈格式不正确。');
+          await assistantDiagnostic({requestId:input.requestId,phase:input.phase,
+            ...(Number.isInteger(input.changes)&&input.changes>=0&&input.changes<=20?{changes:input.changes}:{})});
+          json(res,200,{recorded:true});
         } else if (route === 'POST /cache/clear') {
           const result = await oneAtATime(async () => {
             const stats = await sweep(settings.cacheLocation,true);
