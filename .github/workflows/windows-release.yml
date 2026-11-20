@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing draft release tag matching package.json
+        description: Existing draft or prerelease tag matching package.json
         required: true
         type: string
 
@@ -32,7 +32,7 @@ jobs:
           npm run build
       - name: Package installer
         run: npx electron-builder --win nsis --x64 --publish never
-      - name: Verify and upload to the draft
+      - name: Verify and upload release assets
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -59,7 +59,7 @@ jobs:
             return response.status===204?null:response.json();
           };
           const release=(await api('/releases?per_page=30')).find(r=>r.tag_name===process.env.RELEASE_TAG);
-          if(!release?.draft)throw Error('An existing draft release is required');
+          if(!release||(!release.draft&&!release.prerelease))throw Error('An existing draft or prerelease is required');
           const name='RenderWorkbench-Setup-'+version+'-x64.exe',file='release/'+name;
           const hash=createHash('sha256');for await(const chunk of fs.createReadStream(file))hash.update(chunk);
           const installer={name,size:fs.statSync(file).size,sha256:hash.digest('hex')};

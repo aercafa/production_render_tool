@@ -96,4 +96,4 @@ Windows「导入模型」使用原生文件选择器，记录完整来源路径�
 
 维护便携包时，先执行 `npm run build`，再用 Python 3.11 或以上运行 `python scripts/package-web.py all`。脚本校验固定版本的 Node.js 下载，生成的 ZIP 位于 `release/web/`。
 
-Windows 安装包也可在 GitHub Actions 中手动运行 `Build Windows release`：先创建与 `package.json` 版本一致的草稿发布，再填写其标签（例如 `v0.3.3`）。任务检查、构建并核对安装包内容，将 EXE 和构建来源／校验信息上传到该草稿，不自动公开发布。适合本机大文件上传不稳定的情况。
+Windows 安装包也可在 GitHub Actions 中手动运行 `Build Windows release`：先创建与 `package.json` 版本一致的预发布版本，再填写其标签（例如 `v0.3.3`）。任务检查、构建并核对安装包内容，上传 EXE 和构建来源／校验信息，不自动设为正式版。适合本机大文件上传不稳定的情况。仓库启用不可变发布时，应使用有权读取的草稿，附齐附件后再公开。
