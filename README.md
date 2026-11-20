@@ -95,3 +95,5 @@ Windows「导入模型」使用原生文件选择器，记录完整来源路径�
 `npm run build` 检查类型并构建。安装 Chrome 后可运行 `npm test`。测试使用合成模型和模拟 Chat Completions 服务。指定 `RENDER_32_ORIGINAL`、`RENDER_32_MESH`、`RENDER_MISSING_3DM`、`RENDER_COMPLETE_3DM` 或 `RENDER_CHARIOT_3DM` 可加入相应真实文件测试。
 
 维护便携包时，先执行 `npm run build`，再用 Python 3.11 或以上运行 `python scripts/package-web.py all`。脚本校验固定版本的 Node.js 下载，生成的 ZIP 位于 `release/web/`。
+
+Windows 安装包也可在 GitHub Actions 中手动运行 `Build Windows release`：先创建与 `package.json` 版本一致的草稿发布，再填写其标签（例如 `v0.3.3`）。任务检查、构建并核对安装包内容，将 EXE 和构建来源／校验信息上传到该草稿，不自动公开发布。适合本机大文件上传不稳定的情况。

@@ -1,0 +1,85 @@
+name: Build Windows release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing draft release tag matching package.json
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  installer:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Check and build
+        run: |
+          node --test tests/*.node.mjs
+          npm run build
+      - name: Package installer
+        run: npx electron-builder --win nsis --x64 --publish never
+      - name: Verify and upload to the draft
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          @'
+          import fs from 'node:fs';
+          import {createHash} from 'node:crypto';
+          import {Readable} from 'node:stream';
+          import {extractFile} from '@electron/asar';
+          const version=JSON.parse(fs.readFileSync('package.json','utf8')).version;
+          if(process.env.RELEASE_TAG!=='v'+version)throw Error('Tag must match package.json');
+          const bundle='release/win-unpacked/resources/app.asar';
+          if(JSON.parse(extractFile(bundle,'package.json').toString()).version!==version)throw Error('Installer version mismatch');
+          for(const file of ['dist/index.html','server/assistant.mjs','server/material-rules.mjs','server/local-workbench.mjs']){
+            if(!fs.readFileSync(file).equals(extractFile(bundle,file)))throw Error('Installer content mismatch: '+file);
+          }
+          const repository=process.env.GITHUB_REPOSITORY;
+          const base='https://api.github.com/repos/'+repository;
+          const headers={Authorization:'Bearer '+process.env.GH_TOKEN,Accept:'application/vnd.github+json','User-Agent':'RenderWorkbench-Release'};
+          const api=async(route,options={})=>{
+            const response=await fetch(route.startsWith('https://')?route:base+route,{...options,headers:{...headers,...options.headers},signal:AbortSignal.timeout(10*60*1000)});
+            if(!response.ok)throw Error('GitHub API HTTP '+response.status);
+            return response.status===204?null:response.json();
+          };
+          const release=(await api('/releases?per_page=30')).find(r=>r.tag_name===process.env.RELEASE_TAG);
+          if(!release?.draft)throw Error('An existing draft release is required');
+          const name='RenderWorkbench-Setup-'+version+'-x64.exe',file='release/'+name;
+          const hash=createHash('sha256');for await(const chunk of fs.createReadStream(file))hash.update(chunk);
+          const installer={name,size:fs.statSync(file).size,sha256:hash.digest('hex')};
+          const manifest={version,commit:process.env.GITHUB_SHA,installer,
+            indexSha256:createHash('sha256').update(fs.readFileSync('dist/index.html')).digest('hex'),
+            builtBy:'GitHub Actions',runURL:process.env.GITHUB_SERVER_URL+'/'+repository+'/actions/runs/'+process.env.GITHUB_RUN_ID};
+          const manifestName='Build-Info-'+version+'-windows-x64.json';
+          fs.writeFileSync('release/'+manifestName,JSON.stringify(manifest,null,2));
+          for(const assetName of [name,manifestName]){
+            const existing=(await api('/releases/'+release.id+'/assets')).find(a=>a.name===assetName);
+            if(existing){
+              if(existing.state!=='starter')throw Error('Refusing to replace a completed asset: '+assetName);
+              await api('/releases/assets/'+existing.id,{method:'DELETE'});
+            }
+            const assetFile='release/'+assetName,size=fs.statSync(assetFile).size;
+            const uploaded=await api('https://uploads.github.com/repos/'+repository+'/releases/'+release.id+'/assets?name='+encodeURIComponent(assetName),{
+              method:'POST',headers:{'Content-Type':'application/octet-stream','Content-Length':String(size)},
+              body:Readable.toWeb(fs.createReadStream(assetFile)),duplex:'half',
+            });
+            if(uploaded.state!=='uploaded'||uploaded.size!==size)throw Error('Asset upload mismatch: '+assetName);
+            if(assetName===name&&uploaded.digest&&uploaded.digest!=='sha256:'+installer.sha256)throw Error('Installer checksum mismatch');
+          }
+          console.log(JSON.stringify(manifest,null,2));
+          '@ | node --input-type=module
